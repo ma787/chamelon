@@ -80,14 +80,14 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         let pointers, _data_region = Chamelon.File.of_block index data in
         match pointers with
         | [] -> Lwt.return @@ Ok (pointer::l)
-        | next::_ -> get_ctz_pointers t (Ok (pointer::l)) (index - 1) (Int64.of_int32 next)
+        | next::_ -> get_ctz_pointers t (Ok (pointer::l)) (index - 1) next
 
     let rec follow_links t visited = function
       | Chamelon.Entry.Data (pointer, length) -> begin
-          let file_size = Int32.to_int length in
+          let file_size = Int64.to_int length in
           let index = Chamelon.File.last_block_index ~file_size ~block_size:t.block_size in
-          Log.debug (fun f -> f "data block: last block index %d found starting at %ld (0x%lx)" index pointer pointer);
-          get_ctz_pointers t (Ok []) index (Int64.of_int32 pointer)
+          Log.debug (fun f -> f "data block: last block index %d found starting at %Ld (0x%Lx)" index pointer pointer);
+          get_ctz_pointers t (Ok []) index pointer
         end
       | Chamelon.Entry.Metadata (a, b) ->
         match List.mem (a, b) visited with
@@ -548,10 +548,10 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           let pointers, data_region = Chamelon.File.of_block index data in
           let pointer_region = Cstruct.sub data 0 (4 * List.length pointers) in
           Log.debug (fun f -> f "block index %d at block number %Ld has %d bytes of data and %d outgoing pointers: %a (raw %a)"
-                        index pointer (Cstruct.length data_region) (List.length pointers) Fmt.(list ~sep:comma int32) pointers Cstruct.hexdump_pp pointer_region);
+                        index pointer (Cstruct.length data_region) (List.length pointers) Fmt.(list ~sep:comma int64) pointers Cstruct.hexdump_pp pointer_region);
           match pointers with
           | next::_ ->
-            read_block (data_region :: l) (index - 1) (Int64.of_int32 next)
+            read_block (data_region :: l) (index - 1) next
           | [] ->
             Lwt.return @@ Ok (data_region :: l)
       in
@@ -597,26 +597,26 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         end
         | _, Some (_, ctz) ->
           match Chamelon.File.ctz_of_cstruct ctz with
-          | Some (pointer, length) -> Ok (`Ctz (Int64.of_int32 pointer, Int32.to_int length))
+          | Some (pointer, length) -> Ok (`Ctz (pointer, Int64.to_int length))
           | None -> Error (`Value_expected filename)
 
-    let get t key : (string, error) result Lwt.t =
-      let map_result = function
-        | Ok (`Inline d) -> Lwt.return (Ok d)
-        | Ok (`Ctz ctz) -> get_ctz t key ctz
-        | Error (`Not_found k) -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.v k))
-        | Error (`Value_expected k) -> Lwt.return @@ Error (`Value_expected (Mirage_kv.Key.v k))
-      in
-      match Mirage_kv.Key.segments key with
-      | [] -> Lwt.return @@ Error (`Value_expected key)
-      | basename::[] -> get_value t root_pair basename >>= map_result
-      | _ ->
-        let dirname = Mirage_kv.Key.(parent key |> segments) in
-        Find.find_first_blockpair_of_directory t root_pair dirname >>= function
-        | `Basename_on pair -> begin
-            get_value t pair (Mirage_kv.Key.basename key) >>= map_result
-          end
-        | _ -> Lwt.return @@ Error (`Not_found key)
+          let get t key : (string, error) result Lwt.t =
+            let map_result = function
+              | Ok (`Inline d) -> Lwt.return (Ok d)
+              | Ok (`Ctz ctz) -> get_ctz t key ctz
+              | Error (`Not_found k) -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.v k))
+              | Error (`Value_expected k) -> Lwt.return @@ Error (`Value_expected (Mirage_kv.Key.v k))
+            in
+            match Mirage_kv.Key.segments key with
+            | [] -> Lwt.return @@ Error (`Value_expected key)
+            | basename::[] -> get_value t root_pair basename >>= map_result
+            | _ ->
+              let dirname = Mirage_kv.Key.(parent key |> segments) in
+              Find.find_first_blockpair_of_directory t root_pair dirname >>= function
+              | `Basename_on pair -> begin
+                  get_value t pair (Mirage_kv.Key.basename key) >>= map_result
+                end
+              | _ -> Lwt.return @@ Error (`Not_found key)
 
     let rec address_of_index t ~desired_index (pointer, index) =
       if desired_index = index then Lwt.return @@ Ok pointer
@@ -635,62 +635,62 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
            * we just have to iterate backward until we get there *)
             match pointers with
             | next::_ ->
-               address_of_index t ~desired_index (Int64.of_int32 next, (index - 1))
+               address_of_index t ~desired_index (next, (index - 1))
             | _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
           end else begin
             match pointers with
             (* TODO: we can do better than this if the index is even smaller than index / 2 *)
             | _ :: n_div_2 :: _ ->
-              address_of_index t ~desired_index (Int64.of_int32 n_div_2, (index / 2))
+              address_of_index t ~desired_index (n_div_2, (index / 2))
             | _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
           end
       end
 
-    let get_ctz_partial t key ~offset ~length (pointer, file_size) =
-      let rec read_raw_blocks ~offset_index l index pointer =
-        let data = Cstruct.create t.block_size in
-        This_Block.read t.block pointer [data] >>= function
+      let get_ctz_partial t key ~offset ~length (pointer, file_size) =
+        let rec read_raw_blocks ~offset_index l index pointer =
+          let data = Cstruct.create t.block_size in
+          This_Block.read t.block pointer [data] >>= function
+          | Error _ as e -> Lwt.return e
+          | Ok () ->
+            let pointers, data_region = Chamelon.File.of_block index data in
+            let accumulated_data = data_region :: l in
+            if index <= offset_index then Lwt.return @@ Ok accumulated_data else
+            match pointers with
+            | next::_ ->
+              read_raw_blocks ~offset_index accumulated_data (index - 1) next
+            | [] ->
+              Lwt.return @@ Ok accumulated_data
+        in
+        let last_byte = min file_size (offset + length) in
+        let last_overall_block_index = Chamelon.File.last_block_index ~file_size
+            ~block_size:t.block_size in
+        let last_byte_of_interest_index = Chamelon.File.last_block_index ~file_size:last_byte ~block_size:t.block_size in
+        address_of_index t ~desired_index:last_byte_of_interest_index (pointer, last_overall_block_index) >>= function
         | Error _ as e -> Lwt.return e
-        | Ok () ->
-          let pointers, data_region = Chamelon.File.of_block index data in
-          let accumulated_data = data_region :: l in
-          if index <= offset_index then Lwt.return @@ Ok accumulated_data else
-          match pointers with
-          | next::_ ->
-            read_raw_blocks ~offset_index accumulated_data (index - 1) (Int64.of_int32 next)
-          | [] ->
-            Lwt.return @@ Ok accumulated_data
-      in
-      let last_byte = min file_size (offset + length) in
-      let last_overall_block_index = Chamelon.File.last_block_index ~file_size
-          ~block_size:t.block_size in
-      let last_byte_of_interest_index = Chamelon.File.last_block_index ~file_size:last_byte ~block_size:t.block_size in
-      address_of_index t ~desired_index:last_byte_of_interest_index (pointer, last_overall_block_index) >>= function
-      | Error _ as e -> Lwt.return e
-      | Ok last_byte_of_interest_pointer ->
-        let offset_index = Chamelon.File.last_block_index ~file_size:offset ~block_size:t.block_size in
-        read_raw_blocks ~offset_index [] last_byte_of_interest_index last_byte_of_interest_pointer >>= function
-        | Error _ -> Lwt.return @@ Error (`Not_found key)
-        | Ok [] -> Lwt.return @@ Ok ""
-        | Ok (h::more_blocks) ->
-          (* since our list is just the raw block contents of the relevant bit of the file,
-           * we probably need to drop some bytes from the beginning in order to correctly
-           * return the file starting at the right offset *)
-          let first_block_offset = Chamelon.File.first_byte_on_index
-              ~block_size:t.block_size offset_index
-          in
-          (* this calculation is correct *if* we correctly identified the
-           * first block associated with this offset.
-           * Otherwise it's wrong garbage nonsense, so let's hope we got that
-           * first block correct :sweat_smile: *)
-          let new_hd = Cstruct.shift h (offset - first_block_offset) in
-          let offset_cs = Cstruct.concat @@ new_hd :: more_blocks |> Cstruct.to_string in
-          (* we need to trim the results to either:
-           * the requested length, if offset + length is < file_size
-           * the file size minus the offset, if offset + length is > file_size.
-          *)
-          let final_length = if offset + length > file_size then (file_size - offset) else length in
-          Lwt.return @@ Ok (String.sub offset_cs 0 final_length)
+        | Ok last_byte_of_interest_pointer ->
+          let offset_index = Chamelon.File.last_block_index ~file_size:offset ~block_size:t.block_size in
+          read_raw_blocks ~offset_index [] last_byte_of_interest_index last_byte_of_interest_pointer >>= function
+          | Error _ -> Lwt.return @@ Error (`Not_found key)
+          | Ok [] -> Lwt.return @@ Ok ""
+          | Ok (h::more_blocks) ->
+            (* since our list is just the raw block contents of the relevant bit of the file,
+             * we probably need to drop some bytes from the beginning in order to correctly
+             * return the file starting at the right offset *)
+            let first_block_offset = Chamelon.File.first_byte_on_index
+                ~block_size:t.block_size offset_index
+            in
+            (* this calculation is correct *if* we correctly identified the
+             * first block associated with this offset.
+             * Otherwise it's wrong garbage nonsense, so let's hope we got that
+             * first block correct :sweat_smile: *)
+            let new_hd = Cstruct.shift h (offset - first_block_offset) in
+            let offset_cs = Cstruct.concat @@ new_hd :: more_blocks |> Cstruct.to_string in
+            (* we need to trim the results to either:
+             * the requested length, if offset + length is < file_size
+             * the file size minus the offset, if offset + length is > file_size.
+            *)
+            let final_length = if offset + length > file_size then (file_size - offset) else length in
+            Lwt.return @@ Ok (String.sub offset_cs 0 final_length)
 
     let get_partial t key ~offset ~length : (string, error) result Lwt.t =
       if offset < 0 then begin
@@ -746,7 +746,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           Ok tag.Chamelon.Tag.length
         | _, Some (_tag, data) ->
           match Chamelon.File.ctz_of_cstruct data with
-          | Some (_pointer, length) -> Ok (Int32.to_int length)
+          | Some (_pointer, length) -> Ok (Int64.to_int length)
           | None -> Error (`Value_expected (Mirage_kv.Key.v filename))
 
     let rec size_all t blockpair =
@@ -803,7 +803,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           Log.err (fun f -> f "get_blocks gave us too few blocks for our CTZ file");
           Lwt.return @@ Error `No_space
         | block_number::blocks ->
-          let pointer = Int64.to_int32 block_number in
+          let pointer = block_number in
           let block_cs = Cstruct.create t.block_size in
           let skip_list_size = Chamelon.File.n_pointers index in
           let skip_list_length = skip_list_size * 4 in
@@ -816,15 +816,15 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
            | (_last_index, last_pointer)::_ ->
              (* the first entry in the skip list should be for block _last_index,
               * which is index - 1 *)
-             Cstruct.LE.set_uint32 block_cs 0 last_pointer
+             Cstruct.LE.set_uint64 block_cs 0 last_pointer
           );
           for n_skip_list = 1 to (skip_list_size - 1) do
             let destination_block_index = index / (1 lsl n_skip_list) in
             let point_index = List.assoc destination_block_index written in
-            Cstruct.LE.set_uint32 block_cs (n_skip_list * 4) point_index
+            Cstruct.LE.set_uint64 block_cs (n_skip_list * 4) point_index
           done;
           Cstruct.blit_from_string data so_far block_cs skip_list_length data_length;
-          This_Block.write t.block (Int64.of_int32 pointer) [block_cs] >>= function
+          This_Block.write t.block pointer [block_cs] >>= function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok () ->
             write_ctz_block t blocks ((index, pointer)::written) (index + 1) (so_far + data_length) data
@@ -861,7 +861,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             let name = Chamelon.File.name filename next in
             let ctime = Chamelon.Entry.ctime next (Clock.now_d_ps ()) in
             let ctz = Chamelon.File.create_ctz next
-                ~pointer:last_pointer ~file_size:(Int32.of_int file_size)
+                ~pointer:last_pointer ~file_size:(Int64.of_int file_size)
             in
             let new_entries = entries @ [name; ctime; ctz] in
             Log.debug (fun m -> m "writing %d entries for ctz for file %s of size %d" (List.length new_entries) filename file_size);

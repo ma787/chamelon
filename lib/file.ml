@@ -20,8 +20,8 @@ let create_inline id contents = Tag.({
 
 let create_ctz id ~pointer ~file_size =
   let cs = Cstruct.create (4 * 2) in
-  Cstruct.LE.set_uint32 cs 0 pointer;
-  Cstruct.LE.set_uint32 cs 4 file_size;
+  Cstruct.LE.set_uint64 cs 0 pointer;
+  Cstruct.LE.set_uint64 cs 4 file_size;
   Tag.({
     valid = true;
     type3 = (Tag.LFS_TYPE_STRUCT, ctz_chunk);
@@ -31,7 +31,7 @@ let create_ctz id ~pointer ~file_size =
 
 let ctz_of_cstruct cs =
   if Cstruct.length cs < 8 then None
-  else Some Cstruct.LE.(get_uint32 cs 0, get_uint32 cs 4)
+  else Some Cstruct.LE.(get_uint64 cs 0, get_uint64 cs 4)
 
 let write_inline n id contents =
   [name n id; (create_inline id contents), contents; ]
@@ -51,7 +51,7 @@ let of_block index cs =
   let sizeof_pointer = 4 in
   let pointer_count = n_pointers index in
   let pointers = List.init pointer_count (fun n ->
-      Cstruct.LE.get_uint32 cs (sizeof_pointer * n)
+      Cstruct.LE.get_uint64 cs (sizeof_pointer * n)
     ) in
   let sizeof_data = (Cstruct.length cs) - (sizeof_pointer * pointer_count) in
   (pointers, Cstruct.sub cs (pointer_count * sizeof_pointer) sizeof_data)
