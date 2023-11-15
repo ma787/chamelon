@@ -18,7 +18,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     block_size : int;
     program_block_size : int;
     lookahead : lookahead ref;
-    file_size_max : Cstruct.uint32;
+    file_size_max : Cstruct.uint64;
     name_length_max : Cstruct.uint32;
     new_block_mutex : Lwt_mutex.t;
   }
@@ -1025,7 +1025,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                  name_length_max;
                  new_block_mutex = Lwt_mutex.create ()}
         in
-        Log.debug (fun f -> f "mounting fs with file size max %ld, name length max %ld" file_size_max name_length_max);
+        Log.debug (fun f -> f "mounting fs with file size max %Ld, name length max %ld" file_size_max name_length_max);
         Lwt_mutex.lock t.new_block_mutex >>= fun () ->
         Traverse.follow_links t [] (Chamelon.Entry.Metadata root_pair) >>= function
         | Error _e ->

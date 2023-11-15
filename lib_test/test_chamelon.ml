@@ -106,7 +106,7 @@ module Block = struct
       + 4 (* superblock name tag *)
       + 8 (* "littlefs" *)
       + 4 (* inlinestruct tag *)
-      + 24 (* six 4-byte-long int32s *)
+      + 28 (* five 4-byte-long int32s and one 8-byte-long int64 *)
       + 4 (* crc tag *)
       + 4 (* crc *)
       + 12 (* padding if the block size is 16l *)
