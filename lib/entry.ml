@@ -15,8 +15,8 @@ let info_of_entry (tag, data) =
 
 let ctime id (d, ps) =
   let cs = Cstruct.create @@ 4 + 8 in
-  Cstruct.LE.set_uint64 cs 0 (Int64.of_int d);
-  Cstruct.LE.set_uint64 cs 4 ps;
+  Cstruct.LE.set_uint32 cs 0 (Int32.of_int d);
+  Cstruct.LE.set_uint32 cs 4 ps;
   Tag.({
       valid = true;
       type3 = (LFS_TYPE_USERATTR, 0x74);
@@ -27,8 +27,8 @@ let ctime id (d, ps) =
 let ctime_of_cstruct cs =
   if Cstruct.length cs < 4 + 8 then None
   else begin
-    let d = Cstruct.LE.get_uint64 cs 0 |> Int64.to_int in
-    let ps = Cstruct.LE.get_uint64 cs 4 in
+    let d = Cstruct.LE.get_uint32 cs 0 |> Int32.to_int in
+    let ps = Cstruct.LE.get_uint32 cs 4 in
     Some (d, ps)
   end
 
