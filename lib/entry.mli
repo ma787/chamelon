@@ -1,4 +1,4 @@
-type t = Entry0.t
+type t = Tag.t * Cstruct.t
 type link = | Metadata of (int64 * int64)
             | Data of (int64 * int64)
 
@@ -19,7 +19,7 @@ val lenv_less_hardtail : t list -> int
 (** [ctime id d,ps] returns a creation time entry for [id] at [d,ps] *)
 val ctime : int -> int * int64 -> t
 
-val ctime_of_cstruct : Cstruct.t -> (int * int32) option
+val ctime_of_cstruct : Cstruct.t -> (int * int64) option
 
 val into_cstructv : starting_xor_tag:Cstruct.t -> Cstruct.t -> t list -> int * Cstruct.t
 val to_cstructv : starting_xor_tag:Cstruct.t -> t list -> Cstruct.t * Cstruct.t
