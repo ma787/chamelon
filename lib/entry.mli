@@ -17,7 +17,7 @@ val compact : t list -> t list
 val lenv_less_hardtail : t list -> int
 
 (** [ctime id d,ps] returns a creation time entry for [id] at [d,ps] *)
-val ctime : int -> int * int32 -> t
+val ctime : int -> int * int64 -> t
 
 val ctime_of_cstruct : Cstruct.t -> (int * int32) option
 
