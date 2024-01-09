@@ -164,7 +164,7 @@ let rec merge parent s1 s2 ignore iroot l = match parent with
     | Il _, Lf _ -> raise (MalformedTree "nodes must be at same level")
     | Lf (k1s, p1s, false, _), Lf (k2s, p2s, false, _) ->
     if r && (l + (List.length (v::next)) = 1) && not iroot then 
-      Lf ((List.hd k1s)::v::(List.hd k2s)::[], (List.hd p1s)::pl::(List.hd p2s)::[], true, t)
+      Lf (k1s @ (v::k2s), p1s @ (pl::p2s), true, t)
     else
       let km, pm = k1s @ (v::k2s), p1s @ (pl::p2s) in (* TODO: concatenate lists without @ *)
       let l = List.length km in 
@@ -270,44 +270,47 @@ let steal tree morec = match tree with
   else raise (MalformedTree "child node not found")
 | _ -> raise (MalformedTree "must be an internal node with the two specified child nodes")
 
-let rec delete tree k = match tree with
+let rec delete tree k i = match tree with
 | Il (v::next, pl::pls, ca::cb::cn, r, t) -> 
   let l1, l2 = n_keys ca, n_keys cb in
   if k=v then
     if not (is_leaf ca && l1 < t) then let nk, np = find_predecessor tree (v, pl) false in (* check left subtree *)
     let newt = swap_i tree v pl nk np false in (match newt with
-    | Il (k1s, p1s, c1::cn1, r1, t1) -> Il (k1s, p1s, (delete c1 k)::cn1, r1, t1)
+    | Il (k1s, p1s, c1::cn1, r1, t1) -> Il (k1s, p1s, (delete c1 k 0)::cn1, r1, t1)
     | _ -> raise (MalformedTree "swap failed"))
     else if not (is_leaf cb && l2 < t) then let nk, np = find_successor tree (v, pl) false in (* check right subtree *)
     let newt = swap_i tree v pl nk np false in (match newt with
-    | Il (k1s, p1s, c1::c2::cn1, r1, t1) -> Il (k1s, p1s, c1::(delete c2 k)::cn1, r1, t1)
+    | Il (k1s, p1s, c1::c2::cn1, r1, t1) -> Il (k1s, p1s, c1::(delete c2 k 0)::cn1, r1, t1)
     | _ -> raise (MalformedTree "swap failed"))
     else let mt = merge tree ca cb false false 0 in (match mt with (* merge around key to delete and recursively delete it *)
-    | Il (k1::k1s, p1::p1s, c1::cn1, r1, t1) -> Il (k1::k1s, p1::p1s, (delete c1 k)::cn1, r1, t1)
-    | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k)::[], r1, t1)
+    | Il (k1::k1s, p1::p1s, c1::cn1, r1, t1) -> Il (k1::k1s, p1::p1s, (delete c1 k 0)::cn1, r1, t1)
+    | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k 0)::[], r1, t1)
+    | Lf (_::_, _::_, true, _) -> delete mt k 0
     | _ -> raise (MalformedTree "merge failed"))
   else let leftc, rightc = k<v, next=[] in
     if leftc then
       if l1 < t then
-        if (l2 >= t) then delete (steal tree cb) k (* steal from right sibling *)
-        else let mt = merge tree ca cb false false 0 in (match mt with
-        | Il (_::_, _::_, _::_, _, _) -> delete mt k
-        | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k)::[], r1, t1)
+        if (l2 >= t) then delete (steal tree cb) k i (* steal from right sibling *)
+        else let mt = merge tree ca cb false false i in (match mt with
+        | Il (_::_, _::_, _::_, _, _) -> delete mt k i
+        | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k 0)::[], r1, t1)
+        | Lf (_::_, _::_, true, _) -> delete mt k 0
         | _ -> raise (MalformedTree "merge failed")) (* merge children and recursively delete *)
-        else Il (v::next, pl::pls, (delete ca k)::cb::cn, r, t) (* check left subtree *)
+        else Il (v::next, pl::pls, (delete ca k 0)::cb::cn, r, t) (* check left subtree *)
     else if rightc then
       if l2 < t then
-        if (l1 >= t) then delete (steal tree ca) k (* steal from left sibling *)
-        else let mt = merge tree ca cb false false 0 in (match mt with
-        | Il (_::_, _::_, _::_, _, _) -> delete mt k
-        | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k)::[], r1, t1)
+        if (l1 >= t) then delete (steal tree ca) k i (* steal from left sibling *)
+        else let mt = merge tree ca cb false false i in (match mt with
+        | Il (_::_, _::_, _::_, _, _) -> delete mt k i
+        | Il ([], [], c1::[], r1, t1) -> Il ([], [], (delete c1 k 0)::[], r1, t1)
+        | Lf (_::_, _::_, true, _) -> delete mt k 0
         | _ -> raise (MalformedTree "merge failed")) (* merge children and recursively delete *)
-        else Il (v::next, pl::pls, ca::(delete cb k)::cn, r, t) (* check right subtree *)
-    else restore (delete (Il (next, pls, (cb::cn), r, t)) k) v pl ca (* check next key in node *)
+        else Il (v::next, pl::pls, ca::(delete cb k 0)::cn, r, t) (* check right subtree *)
+    else restore (delete (Il (next, pls, (cb::cn), r, t)) k (i+1)) v pl ca (* check next key in node *)
 | Lf (v::next, pl::pls, r, t) ->
   if k=v then Lf (next, pls, r, t)
-  else if (k<v || next=[]) then raise (NotFound "key to delete not found")
-  else restore (delete (Lf (next, pls, r, t)) k) v pl (Lf ([], [], false, 0))
+  else if (k>v && next!=[]) then restore (delete (Lf (next, pls, r, t)) k (i+1)) v pl (Lf ([], [], false, 0))
+  else raise (NotFound "key to delete not found")
 | _ -> raise (MalformedTree ("not an internal node with >1 child"))
 
 let rec insert_list tree items = match items with
@@ -315,7 +318,7 @@ let rec insert_list tree items = match items with
 | [] -> tree
 
 let rec delete_list tree keys = match keys with
-| k::ks -> delete_list (delete tree k) ks
+| k::ks -> delete_list (delete tree k 0) ks
 | [] -> tree
 
 let create_btree t = Lf ([], [], true, t)
