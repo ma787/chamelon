@@ -127,3 +127,6 @@ let rec of_cstructv ~starting_offset:_ ~program_block_size ~starting_xor_tag ~pr
       let commit = of_entries_filter_crc starting_xor_tag preceding_crc entries in
       commit :: of_cstructv ~preceding_crc:Checkseum.Crc32.default ~starting_offset:0 ~starting_xor_tag:last_tag ~program_block_size next_commit
     end
+
+let to_string t = "commit entries: [" ^ (List.fold_left (fun acc i -> acc ^ Entry.to_string i ^ 
+", ") "" t.entries) ^ "], start_crc: " ^ (Optint.to_string t.start_crc)

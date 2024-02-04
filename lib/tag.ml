@@ -144,3 +144,8 @@ let to_cstruct ~xor_tag_with t =
   let cs = Cstruct.create 4 in
   into_cstruct ~xor_tag_with cs t;
   cs
+
+let to_string t = let type3_to_string = match t.type3 with
+| abs, data -> abstract_type_to_string abs ^ ", " ^ string_of_int data in
+"(valid: " ^ (string_of_bool t.valid) ^ ", type: (" ^ type3_to_string ^ "), id: " ^
+(string_of_int t.id) ^ ", length: " ^ (string_of_int t.length) ^ ")"

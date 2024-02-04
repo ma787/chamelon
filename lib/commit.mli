@@ -17,3 +17,5 @@ val commit_after : t -> Entry.t list -> t
 
 val into_cstruct : filter_hardtail:bool -> starting_offset:int -> program_block_size:int -> starting_xor_tag:Cstruct.t -> next_commit_valid:bool -> Cstruct.t -> t -> (int * Cstruct.t)
 val of_cstructv : starting_offset:int -> program_block_size:int -> starting_xor_tag:Cstruct.t -> preceding_crc:Optint.t -> Cstruct.t -> t list
+
+val to_string : t -> string

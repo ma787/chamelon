@@ -133,3 +133,6 @@ let of_cstructv ~starting_xor_tag cs =
           (Cstruct.shift cs (Tag.size + tag.Tag.length ))
   in
   gather ([], starting_xor_tag, 0) cs
+
+let to_string t = match t with
+| tag, data -> "(" ^ Tag.to_string tag ^ "): " ^ Cstruct.to_string data

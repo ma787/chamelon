@@ -25,3 +25,5 @@ val into_cstructv : starting_xor_tag:Cstruct.t -> Cstruct.t -> t list -> int * C
 val to_cstructv : starting_xor_tag:Cstruct.t -> t list -> Cstruct.t * Cstruct.t
 
 val of_cstructv : starting_xor_tag:Cstruct.t -> Cstruct.t -> t list * Cstruct.t * int
+
+val to_string : t -> string
