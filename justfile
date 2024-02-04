@@ -1,5 +1,6 @@
 image := "_build/default/src/test.img"
 HOME := env_var("HOME")
+DEVICE := "loop22"
 
 block_size := "4096"
 program_block_size := "16"
@@ -40,21 +41,21 @@ readtree:
 
 umount:
 	sudo umount -q /mnt || true
-	sudo losetup -d /dev/loop0 || true
+	sudo losetup -d /dev/{{DEVICE}} || true
 	sudo rm -r /mnt/* || true
 
 mount: umount
-	sudo losetup /dev/loop0 {{image}}
-	sudo chmod a+rw /dev/loop0
-	sudo {{HOME}}/fuse-littlefs/lfs --block_size={{block_size}} -s /dev/loop0 /mnt
+	sudo losetup /dev/{{DEVICE}} {{image}}
+	sudo chmod a+rw /dev/{{DEVICE}}
+	sudo {{HOME}}/Project/fuse-littlefs/lfs --block_size={{block_size}} -s /dev/{{DEVICE}} /mnt
 	# nb: `ls /mnt` will fail if there are no files at all in the filesystem.
 
 fuse-format:
 	dd if=/dev/zero of={{image}} bs=64K count=1
 	sudo umount -q /mnt || true
-	sudo losetup -d /dev/loop0 || true
-	sudo losetup /dev/loop0 {{image}}
-	sudo {{HOME}}/fuse-littlefs/lfs --block_size={{block_size}} --format /dev/loop0
+	sudo losetup -d /dev/{{DEVICE}} || true
+	sudo losetup /dev/{{DEVICE}} {{image}}
+	sudo {{HOME}}/Project/fuse-littlefs/lfs --block_size={{block_size}} --format /dev/{{DEVICE}}
 
 hexdump:
 	xxd {{image}} | less
