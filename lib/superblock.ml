@@ -6,7 +6,7 @@ let magic = Cstruct.of_string "littlefs"
  * they're defined as full hex values and then written nibble-by-nibble *)
 let version = (2, 0) (* major = 2, minor = 0 *)
 let name_length_max = 32l (* apparently this is limited to 1022 *)
-let file_size_max = 4294967295L (* according to lfs.h in littlefs reference implementation, this is the largest value that will not cause problems with functions that take signed 32-bit integers *)
+let file_size_max = 2147483647l (* according to lfs.h in littlefs reference implementation, this is the largest value that will not cause problems with functions that take signed 32-bit integers *)
 let file_attribute_size_max = 1022l (* reference implementation comments on this limit *)
 
 type superblock = {
@@ -15,7 +15,7 @@ type superblock = {
   block_size : Cstruct.uint32;
   block_count : Cstruct.uint32;
   name_length_max : Cstruct.uint32;
-  file_size_max : Cstruct.uint64;
+  file_size_max : Cstruct.uint32;
   file_attribute_size_max : Cstruct.uint32;
 }
 
@@ -26,7 +26,7 @@ type superblock = {
     block_size : uint32_t;
     block_count : uint32_t;
     name_length_max : uint32_t;
-    file_size_max : uint64_t;
+    file_size_max : uint32_t;
     file_attribute_size_max : uint32_t;
   } [@@little_endian]]
 
