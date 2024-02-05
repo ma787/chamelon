@@ -1,4 +1,4 @@
-let sizeof_pointer = 8
+let sizeof_pointer = 4
 
 let inline_struct_chunk = 0x01
 let file_chunk = 0x01
@@ -19,9 +19,9 @@ let create_inline id contents = Tag.({
   })
 
 let create_ctz id ~pointer ~file_size =
-  let cs = Cstruct.create (8 * 2) in
-  Cstruct.LE.set_uint64 cs 0 pointer;
-  Cstruct.LE.set_uint64 cs 8 file_size;
+  let cs = Cstruct.create (4 * 2) in
+  Cstruct.LE.set_uint32 cs 0 pointer;
+  Cstruct.LE.set_uint32 cs 4 file_size;
   Tag.({
     valid = true;
     type3 = (Tag.LFS_TYPE_STRUCT, ctz_chunk);
@@ -30,8 +30,8 @@ let create_ctz id ~pointer ~file_size =
   }, cs)
 
 let ctz_of_cstruct cs =
-  if Cstruct.length cs < 16 then None
-  else Some Cstruct.LE.(get_uint64 cs 0, get_uint64 cs 8)
+  if Cstruct.length cs < 8 then None
+  else Some Cstruct.LE.(get_uint32 cs 0, get_uint32 cs 4)
 
 let write_inline n id contents =
   [name n id; (create_inline id contents), contents; ]
@@ -48,17 +48,17 @@ let n_pointers = function
     else 1
 
 let of_block index cs =
-  let sizeof_pointer = 8 in
+  let sizeof_pointer = 4 in
   let pointer_count = n_pointers index in
   let pointers = List.init pointer_count (fun n ->
-      Cstruct.LE.get_uint64 cs (sizeof_pointer * n)
+      Cstruct.LE.get_uint32 cs (sizeof_pointer * n)
     ) in
   let sizeof_data = (Cstruct.length cs) - (sizeof_pointer * pointer_count) in
   (pointers, Cstruct.sub cs (pointer_count * sizeof_pointer) sizeof_data)
 
 let last_block_index ~file_size ~block_size =
   let rec aux block_index bytes_to_write =
-    let can_write = block_size - ((n_pointers block_index) * 8) in
+    let can_write = block_size - ((n_pointers block_index) * 4) in
     if can_write >= bytes_to_write then block_index
     else aux (block_index + 1) (bytes_to_write - can_write)
   in
@@ -67,5 +67,5 @@ let last_block_index ~file_size ~block_size =
 let rec first_byte_on_index ~block_size index =
   if index = 0 then 0
   else
-     (block_size - ((n_pointers (index - 1))  * 8)) +
+     (block_size - ((n_pointers (index - 1))  * 4)) +
     (first_byte_on_index ~block_size (index - 1))

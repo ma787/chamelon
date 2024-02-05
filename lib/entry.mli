@@ -1,6 +1,6 @@
 type t = Tag.t * Cstruct.t
 type link = | Metadata of (int64 * int64)
-            | Data of (int64 * int64)
+            | Data of (int32 * int32)
 
 val links : t -> link option
 val info_of_entry : t -> (string * [ `Value | `Dictionary]) option

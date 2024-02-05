@@ -8,7 +8,7 @@ let size (tag, data) =
     | Tag.LFS_TYPE_STRUCT, c when c = Tag.Magic.struct_ctz -> begin
       match File.ctz_of_cstruct data with
       | None -> `Skip
-      | Some (_, file_size) -> `File (Int64.to_int file_size)
+      | Some (_, file_size) -> `File (Int32.to_int file_size)
     end
     | Tag.LFS_TYPE_STRUCT, c when c = Tag.Magic.struct_dir -> begin
         match Dir.dirstruct_of_cstruct data with
