@@ -2,6 +2,7 @@ type blockpair = int64 * int64
 type directory_head = blockpair
 
 let root_pair = (0L, 1L)
+let btree_root = 2L
 
 let pp_blockpair = Fmt.(pair ~sep:comma int64 int64)
 
@@ -9,6 +10,8 @@ open Lwt.Infix
 
 module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   module This_Block = Block_ops.Make(Sectors)
+  module Fs_Btree = Btree.Make(Sectors)
+
   type lookahead = {
     offset : int;
     blocks : int64 list ;
@@ -81,14 +84,14 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         match pointers with
         | [] -> Lwt.return @@ Ok (pointer::l)
         | next::_ -> get_ctz_pointers t (Ok (pointer::l)) (index - 1) (Int64.of_int32 next)
+      
+    let build_btree (t : This_Block.t) block_size pointer bf =
+      Fs_Btree.Serial.of_cstruct t block_size bf pointer
+    
+    let all_btree_pointers tree = List.map Int64.of_int32 ((Fs_Btree.Attrs.get_all_keys tree) @ (Fs_Btree.Ids.get_all_pointers []))
 
     let rec follow_links t visited = function
-      | Chamelon.Entry.Data (pointer, length) -> begin
-          let file_size = Int32.to_int length in
-          let index = Chamelon.File.last_block_index ~file_size ~block_size:t.block_size in
-          Log.debug (fun f -> f "data block: last block index %d found starting at %ld (0x%lx)" index pointer pointer);
-          get_ctz_pointers t (Ok []) index (Int64.of_int32 pointer)
-        end
+      | Chamelon.Entry.Data _ -> Lwt.return @@ Ok ([])
       | Chamelon.Entry.Metadata (a, b) ->
         match List.mem (a, b) visited with
         | true -> Log.err (fun f -> f "cycle detected: blockpair %a encountered again after initial visit." pp_blockpair (a, b));
@@ -119,6 +122,11 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             >>= function
             | Ok list -> Lwt.return @@ Ok (a :: b :: list)
             | e -> Lwt.return e
+        
+    let follow_links_tree t visited pair tree =
+      follow_links t visited pair >>= function
+      | Error _ as e -> Lwt.return e
+      | Ok (used_blocks) -> Lwt.return @@ Ok (used_blocks @ (all_btree_pointers tree))
 
     (* [last_block t pair] returns the last blockpair in the hardtail
      * linked list starting at [pair], which may well be [pair] itself *)
@@ -1027,18 +1035,25 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         in
         Log.debug (fun f -> f "mounting fs with file size max %ld, name length max %ld" file_size_max name_length_max);
         Lwt_mutex.lock t.new_block_mutex >>= fun () ->
-        Traverse.follow_links t [] (Chamelon.Entry.Metadata root_pair) >>= function
+        let bf = (t.block_size + 1 - 3) / (2*Fs_Btree.sizeof_pointer) in
+        Traverse.build_btree t.block t.block_size btree_root bf >>= function
         | Error _e ->
           Lwt_mutex.unlock t.new_block_mutex;
-          Log.err (fun f -> f "couldn't get list of used blocks");
+          Log.err (fun f -> f "couldn't build b-tree");
           Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
-        | Ok used_blocks ->
-          Log.debug (fun f -> f "found %d used blocks on block-based key-value store: %a" (List.length used_blocks) Fmt.(list ~sep:sp int64) used_blocks);
-          let open Allocate in
-          let offset, blocks = unused t used_blocks in
-          let lookahead = ref {blocks; offset} in
-          Lwt_mutex.unlock t.new_block_mutex;
-          Lwt.return @@ Ok {t with lookahead; block; block_size; program_block_size}
+        | Ok btree ->
+          (Traverse.follow_links_tree t [] (Chamelon.Entry.Metadata root_pair) btree >>= function
+          | Error _e ->
+            Lwt_mutex.unlock t.new_block_mutex;
+            Log.err (fun f -> f "couldn't get list of used blocks");
+            Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
+          | Ok used_blocks ->
+            Log.debug (fun f -> f "found %d used blocks on block-based key-value store: %a" (List.length used_blocks) Fmt.(list ~sep:sp int64) used_blocks);
+            let open Allocate in
+            let offset, blocks = unused t used_blocks in
+            let lookahead = ref {blocks; offset} in
+            Lwt_mutex.unlock t.new_block_mutex;
+            Lwt.return @@ Ok {t with lookahead; block; block_size; program_block_size})
 
   let format ~program_block_size ~block_size (sectors : Sectors.t) :
     (unit, write_error) result Lwt.t =

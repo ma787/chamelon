@@ -8,16 +8,11 @@ exception NullTree of string
 exception TreeCapacityNotMet of string
 exception NoSpace
 
-let sizeof_pointer = 4
-
 open Lwt.Infix
 
-module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
+module Make(Sectors: Mirage_block.S) = struct
   module This_Block = Block_ops.Make(Sectors)
-  type t = {
-    block : This_Block.t;
-    block_size : int;
-  }
+  let sizeof_pointer = 4
 
   type error = [
     | `Not_found
@@ -120,6 +115,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
     let get_node_pointers_from_id id = List.assoc id !ids
 
+    let get_all_pointers l =
+      let rec list_from_pair_list plist acc = match plist with
+      | (h, c)::prs -> list_from_pair_list prs (h::c::acc)
+      | [] -> acc in
+      let _ids, pointer_pairs = List.split !ids in
+      list_from_pair_list pointer_pairs l
+      
     let remove_id id =
       let current = !ids in
       let newi = List.filter (fun (i, _) -> id != i) current in
@@ -128,7 +130,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
   module Serial = struct
     let write_block t pointer cs =
-      This_Block.write t.block pointer [cs] >>= function
+      This_Block.write t pointer [cs] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> Lwt.return (Ok ())
     
@@ -145,7 +147,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     
     let read_data_block t block_size pointer =
       let cs = Cstruct.create block_size in
-      This_Block.read t.block pointer [cs] >>= function
+      This_Block.read t pointer [cs] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> let p, s = Cstruct.LE.get_uint32 cs 0, Cstruct.to_string ~off:sizeof_pointer cs in
       Lwt.return @@ Ok (p, s)
@@ -160,7 +162,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     
     let read_child_block t block_size cblockpointer n =
       let cs = Cstruct.create block_size in
-      This_Block.read t.block cblockpointer [cs] >>= function
+      This_Block.read t cblockpointer [cs] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> let cpointers = read_pointers cs [] n 0 in
       Lwt.return @@ Ok cpointers
@@ -184,7 +186,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         | Ok (tr) -> get_cn cl (tr::acc))
       | [] -> Lwt.return @@ Ok (acc) in
       let hblock = Cstruct.create block_size in
-      This_Block.read t.block pointer [hblock] >>= function
+      This_Block.read t pointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let id = Int32.to_int (Cstruct.LE.get_uint32 hblock 0) in
@@ -206,7 +208,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   module Block_ops = struct
     let add_key_to_head_block t block_size hpointer k =
       let hblock = Cstruct.create block_size in
-      This_Block.read t.block hpointer [hblock] >>= function
+      This_Block.read t hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
@@ -216,7 +218,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     
     let remove_key_from_head_block t block_size hpointer k =
       let hblock = Cstruct.create block_size in
-      This_Block.read t.block hpointer [hblock] >>= function
+      This_Block.read t hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
@@ -231,7 +233,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     
     let replace_key_in_head_block t block_size hpointer ok newk =
       let hblock = Cstruct.create block_size in
-      This_Block.read t.block hpointer [hblock] >>= function
+      This_Block.read t hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
@@ -246,13 +248,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     
     let add_cpointer_to_child_block t block_size cblockpointer cpointer nk =
       let cblock = Cstruct.create block_size in
-      This_Block.read t.block cblockpointer [cblock] >>= function
+      This_Block.read t cblockpointer [cblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> Cstruct.LE.set_uint32 cblock ((nk+1)*sizeof_pointer) cpointer; Lwt.return @@ Ok (cblock)
     
     let remove_cpointer_from_child_block t block_size cblockpointer cpointer nk =
       let cblock = Cstruct.create block_size in
-      This_Block.read t.block cblockpointer [cblock] >>= function
+      This_Block.read t cblockpointer [cblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let cpointers = Serial.read_pointers cblock [] nk 0 in

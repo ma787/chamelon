@@ -1,6 +1,6 @@
 (executable
   (name test_chamelon)
-  (libraries alcotest cstruct ounit2 chamelon)
+  (libraries alcotest cstruct chamelon)
 )
 (rule
   (alias runtest)
