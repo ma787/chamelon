@@ -1,5 +1,5 @@
-(executables
-  (names test_chamelon test_btree)
+(executable
+  (name test_chamelon)
   (libraries alcotest cstruct ounit2 chamelon)
 )
 (rule
