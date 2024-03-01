@@ -3,6 +3,7 @@ type directory_head = blockpair
 
 let root_pair = (0L, 1L)
 let btree_root = 2L
+let btree_fs = ref (Btree.Lf ([], [], false, 0, 0))
 
 let pp_blockpair = Fmt.(pair ~sep:comma int64 int64)
 
@@ -546,33 +547,20 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
        (string, error) result Lwt.t
 
   end = struct
-
-    let get_ctz t key (pointer, file_size) =
-      let rec read_block l index pointer =
-        let data = Cstruct.create t.block_size in
-        This_Block.read t.block pointer [data] >>= function
-        | Error _ as e -> Lwt.return e
-        | Ok () ->
-          let pointers, data_region = Chamelon.File.of_block index data in
-          let pointer_region = Cstruct.sub data 0 (4 * List.length pointers) in
-          Log.debug (fun f -> f "block index %d at block number %Ld has %d bytes of data and %d outgoing pointers: %a (raw %a)"
-                        index pointer (Cstruct.length data_region) (List.length pointers) Fmt.(list ~sep:comma int32) pointers Cstruct.hexdump_pp pointer_region);
-          match pointers with
-          | next::_ ->
-            read_block (data_region :: l) (index - 1) (Int64.of_int32 next)
-          | [] ->
-            Lwt.return @@ Ok (data_region :: l)
-      in
-      let index = Chamelon.File.last_block_index ~file_size
-          ~block_size:t.block_size in
-      Log.debug (fun f -> f "last block has index %d (file size is %d)" index file_size);
-      read_block [] index pointer >>= function
-      | Error _ -> Lwt.return @@ Error (`Not_found key)
-      | Ok l ->
-        (* the last block very likely needs to be trimmed *)
-        let cs = Cstruct.sub (Cstruct.concat l) 0 file_size in
-        let s = Cstruct.(to_string cs) in
-        Lwt.return @@ Ok s
+    let get_btree_file t key (pointer, file_size) =
+      let rec read_file pointer size acc =
+        Fs_Btree.Serial.read_data_block t.block t.block_size pointer >>= (function
+          | Error _ as e -> Lwt.return e
+          | Ok (p, s) ->
+            let flen = String.length s in
+            let diff = size - flen in
+            if diff <= 0 then Lwt.return @@ Ok (s::acc)
+            else read_file (Int64.of_int32 p) diff (s::acc)) in
+      read_file pointer file_size [] >>= (function
+        | Error _ -> Lwt.return @@ Error (`Not_found key)
+        | Ok (data) ->
+          let s = String.sub (String.concat "" (List.rev data)) 0 file_size in
+          Lwt.return @@ Ok s)
 
     let get_value t parent_dir_head filename =
       Find.entries_of_name t parent_dir_head filename >|= function
@@ -611,7 +599,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     let get t key : (string, error) result Lwt.t =
       let map_result = function
         | Ok (`Inline d) -> Lwt.return (Ok d)
-        | Ok (`Ctz ctz) -> get_ctz t key ctz
+        | Ok (`Ctz ctz) -> get_btree_file t key ctz
         | Error (`Not_found k) -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.v k))
         | Error (`Value_expected k) -> Lwt.return @@ Error (`Value_expected (Mirage_kv.Key.v k))
       in
@@ -653,6 +641,33 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             | _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
           end
       end
+
+    let get_btree_partial t key ~offset ~length (pointer, file_size) =
+      let rec read_file pointer read started acc =
+        Fs_Btree.Serial.read_data_block t.block t.block_size pointer >>= (function
+          | Error _ as e -> Lwt.return e
+          | Ok (p, s) ->
+            let flen = String.length s in
+            let current = read + flen in
+            if current >= file_size then Lwt.return @@ Ok ((String.sub s 0 (file_size-current)::acc))
+            else if started then
+              let diff = current-(offset+length) in
+              if diff >= 0 then
+                let sc = String.sub s 0 (flen-diff) in
+                Lwt.return @@ Ok (sc::acc)
+              else read_file (Int64.of_int32 p) current started (s::acc)
+            else let diff = current-offset in
+            if diff >= 0 then
+              let sc = String.sub s diff (flen-diff) in 
+              read_file (Int64.of_int32 p) current true (sc::acc)
+            else read_file (Int64.of_int32 p) current started acc) in
+      read_file pointer 0 false [] >>= (function
+        | Error _ -> Lwt.return @@ Error (`Not_found key)
+        | Ok (data) ->
+          let req = offset + length in
+          let lim = if file_size >= req then file_size else length in
+          let s = String.sub (String.concat "" (List.rev data)) offset lim in
+          Lwt.return @@ Ok s)
 
     let get_ctz_partial t key ~offset ~length (pointer, file_size) =
       let rec read_raw_blocks ~offset_index l index pointer =
@@ -716,7 +731,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             with Invalid_argument _ -> Lwt.return @@ Error (`Not_found key)
           end
           | Ok (`Ctz ctz) ->
-            get_ctz_partial t key ~offset ~length ctz
+            get_btree_partial t key ~offset ~length ctz
         in
         match Mirage_kv.Key.segments key with
         | [] -> Lwt.return @@ Error (`Value_expected key)
@@ -797,7 +812,33 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     val set_in_directory : directory_head -> t -> string -> string ->
       (unit, write_error) result Lwt.t
 
-  end = struct  
+  end = struct
+    let rec write_btree_block t blocks written so_far data tree =
+      if Int.compare so_far (String.length data) >= 0 then begin
+        Lwt.return @@ Ok (written, tree)
+      end else begin
+        match blocks with
+        | [] -> 
+          Log.err (fun f -> f "get_blocks gave us too few blocks for our file");
+          Lwt.return @@ Error `No_space
+        | block_number::blocks ->
+          let pointer = Int64.to_int32 block_number in
+          let b_size = t.block_size - Fs_Btree.sizeof_pointer in
+          let to_write = max b_size (String.length data - so_far) in
+          let pl = String.sub data so_far to_write in
+          let last = (Int.compare (so_far + to_write) (String.length data) >= 0) in
+          Fs_Btree.insert_and_write t.block t.block_size tree pointer pl (List.map Int64.to_int32 blocks) last >>= (function
+          | Error _ -> Lwt.return @@ Error `No_space
+          | Ok (tr, ps) -> 
+            write_btree_block t (List.map Int64.of_int32 ps) (pointer::written) (so_far + to_write) data tr)
+          end
+
+    let write_btree t data =
+      let b_size = t.block_size - Fs_Btree.sizeof_pointer in
+      let n_blocks = (String.length data / b_size) + 1 in
+      Allocate.get_blocks t n_blocks >>= function
+      | Error _ as e -> Lwt.return e
+      | Ok blocks -> write_btree_block t blocks [] 0 data !btree_fs
 
     (* write_ctz_block continues writing a CTZ `data` to `t` from the block list `blocks`. *)
     let rec write_ctz_block t blocks written index so_far data =
@@ -857,11 +898,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         | Some next_blockpair -> write_in_ctz next_blockpair t filename data entries
         | None ->
           let file_size = String.length data in
-          write_ctz t data >>= function
+          write_btree t data >>= function
           | Error _ as e -> Lwt.return e
-          | Ok [] -> Lwt.return @@ Error `No_space
-          | Ok ((_last_index, last_pointer)::_) ->
+          | Ok ([], _) -> Lwt.return @@ Error `No_space
+          | Ok (pointers, tree) ->
             (* the file has been written; find an ID and write the appropriate metadata *)
+            btree_fs := tree;
+            let last_pointer = List.hd (List.rev pointers) in
             let next = match Chamelon.Block.(IdSet.max_elt_opt @@ ids root) with
               | None -> 1
               | Some n -> n + 1
@@ -1049,6 +1092,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
           | Ok used_blocks ->
             Log.debug (fun f -> f "found %d used blocks on block-based key-value store: %a" (List.length used_blocks) Fmt.(list ~sep:sp int64) used_blocks);
+            btree_fs := btree;
             let open Allocate in
             let offset, blocks = unused t used_blocks in
             let lookahead = ref {blocks; offset} in

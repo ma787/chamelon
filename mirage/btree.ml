@@ -466,18 +466,24 @@ module Make(Sectors: Mirage_block.S) = struct
         | Ok (tr) -> insert t block_size tr k false ps)
       | _ -> Lwt.return @@ Error `No_space)
     else if (l && not r) then raise (MalformedTree "full node not split ahead of time")
-    else if k<v then Lwt.return @@ Ok (Lf (k::v::next, ""::pl::pls, r, bf, id), id, false)
-    else if k=v then Lwt.return @@ Ok (tree, id, true) (* update payload *)
-    else if next=[] then Lwt.return @@ Ok (Lf (v::k::next, pl::""::pls, r, bf, id), id, false)
+    else if k<v then Lwt.return @@ Ok (Lf (k::v::next, ""::pl::pls, r, bf, id), id, false, pointers)
+    else if k=v then Lwt.return @@ Ok (tree, id, true, pointers) (* update payload *)
+    else if next=[] then Lwt.return @@ Ok (Lf (v::k::next, pl::""::pls, r, bf, id), id, false, pointers)
     else insert t block_size (Lf (next, pls, r, bf, id)) k false pointers >>= (function
       | Error _ -> Lwt.return @@ Error `No_space
-      | Ok (tr, tr_id, update) -> 
+      | Ok (tr, tr_id, update, ps) -> 
         let r_tr = restore tr v pl (Lf ([], [], false, 0, 0)) in
-        Lwt.return @@ Ok (r_tr, tr_id, update))
-  | Lf ([], [], true, bf, id) -> Lwt.return @@ Ok (Lf (k::[], ""::[], true, bf, id), id, false)
+        Lwt.return @@ Ok (r_tr, tr_id, update, ps))
+  | Lf ([], [], true, bf, id) -> Lwt.return @@ Ok (Lf (k::[], ""::[], true, bf, id), id, false, pointers)
   | Il (v::next, pl::pls, c1::c2::cn, r, bf, id) -> (* every non-leaf node must have at least 2 children *)
     let l = (List.length(v::next) == 2*bf-1) in
-    if (l && r && not i) then (match pointers with
+    if (l && r && not i) then (
+      if Attrs.is_leaf c1 then (match pointers with
+        | p1::p2::ps -> split_root t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree >>= (function
+          | Error _ -> Lwt.return @@ Error `No_space
+          | Ok (tr) -> insert t block_size tr k false ps)
+        | _ -> Lwt.return @@ Error `No_space)
+      else match pointers with
       | p1::p2::p3::p4::ps -> split_root t block_size [p1; p2] [p3; p4] tree >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
         | Ok (tr) -> insert t block_size tr k false ps)
@@ -492,7 +498,7 @@ module Make(Sectors: Mirage_block.S) = struct
           | _ -> Lwt.return @@ Error `No_space)
         else insert t block_size c1 k false pointers >>= (function 
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update))
+        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update, ps))
       | Lf (k1s, _, _, _, _) -> 
         if List.length k1s == 2*bf-1 then (match pointers with
           | p1::ps -> split t block_size p1 Int32.max_int c1 tree (bf-1) >>= (function
@@ -501,8 +507,8 @@ module Make(Sectors: Mirage_block.S) = struct
           | _ -> Lwt.return @@ Error `No_space)
         else insert t block_size c1 k false pointers >>= (function 
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update))
-    else if k=v then Lwt.return @@ Ok (tree, id, true) (* update payload *)
+        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update, ps))
+    else if k=v then Lwt.return @@ Ok (tree, id, true, pointers) (* update payload *)
     else if next=[] then match c2 with (* rightmost child *)
       | Il (k2s, _, _, _, _, _) ->
         if List.length k2s == 2*bf-1 then (match pointers with
@@ -512,7 +518,7 @@ module Make(Sectors: Mirage_block.S) = struct
           | _ -> Lwt.return @@ Error `No_space)
         else insert t block_size c2 k false pointers >>= (function 
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update))
+        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update, ps))
       | Lf (k2s, _, _, _, _) ->
         if List.length k2s == 2*bf-1 then (match pointers with
           | p1::ps -> split t block_size p1 Int32.max_int c2 tree (bf-1) >>= (function
@@ -521,28 +527,29 @@ module Make(Sectors: Mirage_block.S) = struct
           | _ -> Lwt.return @@ Error `No_space)
         else insert t block_size c2 k false pointers >>= (function 
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update))
+        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update, ps))
     else (insert t block_size (Il (next, pls, c2::cn, r, bf, id)) k false pointers >>= function
     | Error _ -> Lwt.return @@ Error `No_space
-    | Ok (tr, tr_id, update) -> Lwt.return @@ Ok (restore tr v pl c1, tr_id, update))
+    | Ok (tr, tr_id, update, ps) -> Lwt.return @@ Ok (restore tr v pl c1, tr_id, update, ps))
   | _ -> raise (MalformedTree "internal node cannot be empty or without children")
 
-  let insert_and_write t block_size tree k pl next pointers =
-    let write_block t block_size k next pl tr =
+  let insert_and_write t block_size tree k pl pointers last =
+    let write_block t block_size k next pl tr ps =
       Serial.write_data_block_from_pl t block_size (Int64.of_int32 k) next pl >>= function
       | Error _ -> Lwt.return @@ Error `No_space
-      | Ok () -> Lwt.return @@ Ok (tr) in
+      | Ok () -> Lwt.return @@ Ok (tr, ps) in
     insert t block_size tree k false pointers >>= function
     | Error _ -> Lwt.return @@ Error `No_space
-    | Ok (tr, tr_id, update) ->
+    | Ok (tr, tr_id, update, ps) ->
+      let next = if (ps=[] || last) then Int32.max_int else List.hd ps in
       if not update then
         let hpointer, _cpointer = Ids.get_node_pointers_from_id tr_id in
         Block_ops.add_key_to_head_block t block_size (Int64.of_int32 hpointer) k >>= (function
         | Error _ -> Lwt.return @@ Error `Not_found
         | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () -> write_block t block_size k next pl tr))
-      else write_block t block_size k next pl tr
+          | Ok () -> write_block t block_size k next pl tr ps))
+      else write_block t block_size k next pl tr ps
 
   (* takes two child nodes and merges them into one node *)
   let rec merge t block_size parent s1 s2 ignore iroot l = 
