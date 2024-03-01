@@ -3,7 +3,7 @@ type directory_head = blockpair
 
 let root_pair = (0L, 1L)
 let btree_root = 2L
-let btree_fs = ref (Btree.Lf ([], [], false, 0, 0))
+
 
 let pp_blockpair = Fmt.(pair ~sep:comma int64 int64)
 
@@ -47,6 +47,34 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                                    without success. *)
   ]
 
+  module Fs_data = struct
+
+    let btree = ref (Btree.Lf ([], [], false, 0, -1))
+    let fat = ref []
+
+    let update_btree tree = btree := tree
+
+    let get_file_table pointer = List.assoc pointer !fat
+
+    let add_file pointer pointers =
+      let current = !fat in
+      let newl = (pointer, pointers)::current in
+      fat := newl
+
+    let remove_file t pointer = 
+      try 
+      let plist = List.assoc pointer !fat in
+      Fs_Btree.delete_list t.block t.block_size !btree plist >>= (function
+      | Error _ -> Lwt.return @@ Error `Not_found
+      | Ok (newt) ->
+        let newl = List.filter (fun (f, _) -> not (Int32.equal f pointer)) !fat in
+        btree := newt; fat := newl;
+        Lwt.return @@ Ok ())
+      with Not_found -> Lwt.return @@ Error `Not_found
+
+  end
+      
+      
   module Read = struct
 
     (* get the wodge of data at this block number, and attempt to parse it *)
@@ -543,6 +571,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
   module File_read : sig
     val get : t -> Mirage_kv.Key.t -> (string, error) result Lwt.t
+    val get_value : t -> (int64 * int64) -> string -> ([> `Ctz of int64 * int | `Inline of string],[> `Not_found of string | `Value_expected of string]) result Lwt.t
     val get_partial : t -> Mirage_kv.Key.t -> offset:int -> length:int ->
        (string, error) result Lwt.t
 
@@ -614,106 +643,24 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           end
         | _ -> Lwt.return @@ Error (`Not_found key)
 
-    let rec address_of_index t ~desired_index (pointer, index) =
-      if desired_index = index then Lwt.return @@ Ok pointer
-      else begin
-        let data = Cstruct.create t.block_size in
-        This_Block.read t.block pointer [data] >>= function
-        | Error e ->
-          Log.err (fun f -> f "block read error: %a" This_Block.pp_error e);
-          Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
-        | Ok () ->
-          let pointers, _ = Chamelon.File.of_block index data in
-          if desired_index > index / 2 || (List.length pointers) < 2 then begin
-          (* worst case: we want an index that's between our index and
-           * (our index / 2), so we can't jump to it (or this index isn't
-           * a multiple of 2, so we only have one link);
-           * we just have to iterate backward until we get there *)
-            match pointers with
-            | next::_ ->
-               address_of_index t ~desired_index (Int64.of_int32 next, (index - 1))
-            | _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
-          end else begin
-            match pointers with
-            (* TODO: we can do better than this if the index is even smaller than index / 2 *)
-            | _ :: n_div_2 :: _ ->
-              address_of_index t ~desired_index (Int64.of_int32 n_div_2, (index / 2))
-            | _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.empty))
-          end
-      end
-
     let get_btree_partial t key ~offset ~length (pointer, file_size) =
-      let rec read_file pointer read started acc =
-        Fs_Btree.Serial.read_data_block t.block t.block_size pointer >>= (function
+      let rec read_file pointers index endi acc =
+        Fs_Btree.Serial.read_data_block t.block t.block_size (List.nth pointers index) >>= (function
           | Error _ as e -> Lwt.return e
-          | Ok (p, s) ->
-            let flen = String.length s in
-            let current = read + flen in
-            if current >= file_size then Lwt.return @@ Ok ((String.sub s 0 (file_size-current)::acc))
-            else if started then
-              let diff = current-(offset+length) in
-              if diff >= 0 then
-                let sc = String.sub s 0 (flen-diff) in
-                Lwt.return @@ Ok (sc::acc)
-              else read_file (Int64.of_int32 p) current started (s::acc)
-            else let diff = current-offset in
-            if diff >= 0 then
-              let sc = String.sub s diff (flen-diff) in 
-              read_file (Int64.of_int32 p) current true (sc::acc)
-            else read_file (Int64.of_int32 p) current started acc) in
-      read_file pointer 0 false [] >>= (function
+          | Ok (_, s) ->
+            if (Int.equal index endi) then Lwt.return @@ Ok (s::acc)
+            else read_file pointers (index+1) endi (s::acc)) in
+      let table = Fs_data.get_file_table (Int64.to_int32 pointer) in
+      let tlen = List.length table in
+      let start_index = min tlen (max 0 (offset / (t.block_size - Fs_Btree.sizeof_pointer))) in
+      let end_index = min tlen (max 0 (offset + length) / (t.block_size - Fs_Btree.sizeof_pointer)) in
+      read_file (List.map Int64.of_int32 table) start_index end_index [] >>= (function
         | Error _ -> Lwt.return @@ Error (`Not_found key)
         | Ok (data) ->
-          let req = offset + length in
-          let lim = if file_size >= req then file_size else length in
-          let s = String.sub (String.concat "" (List.rev data)) offset lim in
+          let starti = (max offset 0) in
+          let endi = (min (max (offset+length) 0) file_size) in
+          let s = String.sub (String.concat "" (List.rev data)) starti (endi-starti) in
           Lwt.return @@ Ok s)
-
-    let get_ctz_partial t key ~offset ~length (pointer, file_size) =
-      let rec read_raw_blocks ~offset_index l index pointer =
-        let data = Cstruct.create t.block_size in
-        This_Block.read t.block pointer [data] >>= function
-        | Error _ as e -> Lwt.return e
-        | Ok () ->
-          let pointers, data_region = Chamelon.File.of_block index data in
-          let accumulated_data = data_region :: l in
-          if index <= offset_index then Lwt.return @@ Ok accumulated_data else
-          match pointers with
-          | next::_ ->
-            read_raw_blocks ~offset_index accumulated_data (index - 1) (Int64.of_int32 next)
-          | [] ->
-            Lwt.return @@ Ok accumulated_data
-      in
-      let last_byte = min file_size (offset + length) in
-      let last_overall_block_index = Chamelon.File.last_block_index ~file_size
-          ~block_size:t.block_size in
-      let last_byte_of_interest_index = Chamelon.File.last_block_index ~file_size:last_byte ~block_size:t.block_size in
-      address_of_index t ~desired_index:last_byte_of_interest_index (pointer, last_overall_block_index) >>= function
-      | Error _ as e -> Lwt.return e
-      | Ok last_byte_of_interest_pointer ->
-        let offset_index = Chamelon.File.last_block_index ~file_size:offset ~block_size:t.block_size in
-        read_raw_blocks ~offset_index [] last_byte_of_interest_index last_byte_of_interest_pointer >>= function
-        | Error _ -> Lwt.return @@ Error (`Not_found key)
-        | Ok [] -> Lwt.return @@ Ok ""
-        | Ok (h::more_blocks) ->
-          (* since our list is just the raw block contents of the relevant bit of the file,
-           * we probably need to drop some bytes from the beginning in order to correctly
-           * return the file starting at the right offset *)
-          let first_block_offset = Chamelon.File.first_byte_on_index
-              ~block_size:t.block_size offset_index
-          in
-          (* this calculation is correct *if* we correctly identified the
-           * first block associated with this offset.
-           * Otherwise it's wrong garbage nonsense, so let's hope we got that
-           * first block correct :sweat_smile: *)
-          let new_hd = Cstruct.shift h (offset - first_block_offset) in
-          let offset_cs = Cstruct.concat @@ new_hd :: more_blocks |> Cstruct.to_string in
-          (* we need to trim the results to either:
-           * the requested length, if offset + length is < file_size
-           * the file size minus the offset, if offset + length is > file_size.
-          *)
-          let final_length = if offset + length > file_size then (file_size - offset) else length in
-          Lwt.return @@ Ok (String.sub offset_cs 0 final_length)
 
     let get_partial t key ~offset ~length : (string, error) result Lwt.t =
       if offset < 0 then begin
@@ -838,55 +785,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       let n_blocks = (String.length data / b_size) + 1 in
       Allocate.get_blocks t n_blocks >>= function
       | Error _ as e -> Lwt.return e
-      | Ok blocks -> write_btree_block t blocks [] 0 data !btree_fs
-
-    (* write_ctz_block continues writing a CTZ `data` to `t` from the block list `blocks`. *)
-    let rec write_ctz_block t blocks written index so_far data =
-      if Int.compare so_far (String.length data) >= 0 then begin
-        (* we purposely don't reverse the list because we're going to want
-         * the *last* block for inclusion in the ctz structure *)
-        Lwt.return @@ Ok written
-      end else begin
-        match blocks with
-        | [] ->
-          Log.err (fun f -> f "get_blocks gave us too few blocks for our CTZ file");
-          Lwt.return @@ Error `No_space
-        | block_number::blocks ->
-          let pointer = Int64.to_int32 block_number in
-          let block_cs = Cstruct.create t.block_size in
-          let skip_list_size = Chamelon.File.n_pointers index in
-          let skip_list_length = skip_list_size * 4 in
-          let data_length = min (t.block_size - skip_list_length) ((String.length data) - so_far) in
-          (* the 0th item in the skip list is always (index - 1). Only exception
-           * is the last block in the list (the first block in the file),
-           * which has no skip list *)
-          (match written with
-           | [] -> ()
-           | (_last_index, last_pointer)::_ ->
-             (* the first entry in the skip list should be for block _last_index,
-              * which is index - 1 *)
-             Cstruct.LE.set_uint32 block_cs 0 last_pointer
-          );
-          for n_skip_list = 1 to (skip_list_size - 1) do
-            let destination_block_index = index / (1 lsl n_skip_list) in
-            let point_index = List.assoc destination_block_index written in
-            Cstruct.LE.set_uint32 block_cs (n_skip_list * 4) point_index
-          done;
-          Cstruct.blit_from_string data so_far block_cs skip_list_length data_length;
-          This_Block.write t.block (Int64.of_int32 pointer) [block_cs] >>= function
-          | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () ->
-            write_ctz_block t blocks ((index, pointer)::written) (index + 1) (so_far + data_length) data
-      end
-
-    (* Get the correct number of blocks to write `data` as a CTZ, then write it. *)
-    let write_ctz t data =
-      let data_length = String.length data in
-      let last_block_index = Chamelon.File.last_block_index ~file_size:data_length ~block_size:t.block_size in
-      Allocate.get_blocks t (last_block_index + 1) >>= function
-      | Error _ as e -> Lwt.return e
-      | Ok blocks ->
-        write_ctz_block t blocks [] 0 0 data
+      | Ok blocks -> write_btree_block t blocks [] 0 data !Fs_data.btree
 
     (* Find the correct directory structure in which to write the metadata entry for the CTZ pointer.
      * Write the CTZ, then write the metadata. *)
@@ -903,8 +802,10 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           | Ok ([], _) -> Lwt.return @@ Error `No_space
           | Ok (pointers, tree) ->
             (* the file has been written; find an ID and write the appropriate metadata *)
-            btree_fs := tree;
-            let last_pointer = List.hd (List.rev pointers) in
+            let rev_pointers = List.rev pointers in
+            let last_pointer = List.hd rev_pointers in
+            Fs_data.update_btree tree;
+            Fs_data.add_file last_pointer rev_pointers;
             let next = match Chamelon.Block.(IdSet.max_elt_opt @@ ids root) with
               | None -> 1
               | Some n -> n + 1
@@ -985,6 +886,14 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   end
 
   module Delete = struct
+    let delete_file_data t dir filename = 
+      File_read.get_value t dir filename >>= function
+      | Ok (`Inline _) -> Lwt.return @@ Ok ()
+      | Ok (`Ctz ctz) -> (match ctz with
+        | pointer, _file_size -> Fs_data.remove_file t (Int64.to_int32 pointer))
+      | Error (`Not_found _) -> Lwt.return @@ Ok ()
+      | Error (`Value_expected _) -> Lwt.return @@ Ok ()
+
     let delete_in_directory directory_head t name =
       Find.entries_of_name t directory_head name >>= function
         (* several "it's not here" cases *)
@@ -996,19 +905,24 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                        pp_blockpair directory_head name);
         Lwt.return @@ Ok ()
       | Ok ((blockpair_with_id, hd::_tl)::_) ->
-        let id = Chamelon.Tag.((fst hd).id) in
-        Log.debug (fun m -> m "id %d found for name %s on block %a" id name
+        delete_file_data t blockpair_with_id name >>= (function
+        | Error _ -> 
+          Log.debug (fun m -> m "file not found in dir for %s" name);
+          Lwt.return @@ Ok ()
+        | Ok () ->
+          let id = Chamelon.Tag.((fst hd).id) in
+          Log.debug (fun m -> m "id %d found for name %s on block %a" id name
                    pp_blockpair blockpair_with_id);
-        Read.block_of_block_pair t blockpair_with_id >>= function
-        | Error _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.v name))
-        | Ok block ->
-          Log.debug (fun m -> m "adding deletion for id %d on block pair %a"
+          Read.block_of_block_pair t blockpair_with_id >>= function
+          | Error _ -> Lwt.return @@ Error (`Not_found (Mirage_kv.Key.v name))
+          | Ok block ->
+            Log.debug (fun m -> m "adding deletion for id %d on block pair %a"
                          id pp_blockpair blockpair_with_id);
-          let deletion = Chamelon.Tag.delete id in
-          let new_block = Chamelon.Block.add_commit block [(deletion, Cstruct.empty)] in
-          Write.block_to_block_pair t new_block blockpair_with_id >>= function
-          | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () -> Lwt.return @@ Ok ()
+            let deletion = Chamelon.Tag.delete id in
+            let new_block = Chamelon.Block.add_commit block [(deletion, Cstruct.empty)] in
+            Write.block_to_block_pair t new_block blockpair_with_id >>= function
+            | Error _ -> Lwt.return @@ Error `No_space
+            | Ok () -> Lwt.return @@ Ok ())
 
   end
 
@@ -1092,7 +1006,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
           | Ok used_blocks ->
             Log.debug (fun f -> f "found %d used blocks on block-based key-value store: %a" (List.length used_blocks) Fmt.(list ~sep:sp int64) used_blocks);
-            btree_fs := btree;
+            Fs_data.update_btree btree;
             let open Allocate in
             let offset, blocks = unused t used_blocks in
             let lookahead = ref {blocks; offset} in

@@ -190,11 +190,12 @@ module Make(Sectors: Mirage_block.S) = struct
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let id = Int32.to_int (Cstruct.LE.get_uint32 hblock 0) in
-        let cblockpointer = Cstruct.LE.get_uint32 hblock sizeof_pointer in
+        if (pointer=2L && id != 1) then Lwt.return @@ Ok (Lf ([], [], true, bf, 1))
+        else let cblockpointer = Cstruct.LE.get_uint32 hblock sizeof_pointer in
         let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
         let keys = List.sort Int32.compare (read_pointers hblock [] ((nk-1) + 3) 3) in
         let pls = List.init nk (fun _ -> "") in (* do not read block data from disk *)
-        let r = id = 0 in (* root node has id 0 *)
+        let r = id = 1 in (* root node has id 1 *)
         if Int32.equal cblockpointer Int32.max_int then Lwt.return @@ Ok (Lf (keys, pls, r, bf, id))
         else read_child_block t block_size (Int64.of_int32 cblockpointer) nk >>= (function
         | Error _ as e -> Lwt.return e
