@@ -35,6 +35,13 @@ module Make(Sectors: Mirage_block.S) = struct
     | Il (ks, _, _, _, _, _) -> List.length ks
     | Lf (ks, _, _, _, _) -> List.length ks
 
+    let get_hd tree = match tree with
+    | Il (k::_, _, _, _, _, _) -> k
+    | Lf (k::_, _, _, _, _) -> k
+    | _ -> Int32.max_int
+
+    let equal t1 t2 = Int32.equal (get_hd t1) (get_hd t2)
+
     let is_leaf tree = match tree with
     | Il _ -> false
     | Lf _ -> true
@@ -42,11 +49,6 @@ module Make(Sectors: Mirage_block.S) = struct
     let is_root tree = match tree with
     | Il (_, _, _, r, _, _) -> r
     | Lf (_, _, r, _, _) -> r
-
-    let get_hd tree = match tree with
-    | Il (k::_, _, _, _, _, _) -> k
-    | Lf (k::_, _, _, _, _) -> k
-    | _ -> Int32.max_int
 
     let get_keys tree = match tree with
     | Il (ks, _, _, _, _, _) -> ks
@@ -147,7 +149,7 @@ module Make(Sectors: Mirage_block.S) = struct
       | Il ([], [], _::[], _, _, _) -> raise (NotFound "child node not found")
       | _ -> raise (MalformedTree ""))
     
-    let rec remove_key tree k = match tree with
+    let remove_key tree k = match tree with
     | Lf (ks, pls, r, t, id) -> Lf ((List.filter (fun i -> not (Int32.equal k i)) ks), List.tl pls, r, t, id)
     | _ -> raise (MalformedTree "cannot remove key from internal node")
   
@@ -413,71 +415,49 @@ module Make(Sectors: Mirage_block.S) = struct
     else raise (MalformedTree "child node to split not found")
   | _ -> raise (MalformedTree "must be internal node with >1 child")
 
-  (* splits a root node into three, resulting in a new root and increasing the tree depth by 1 *)
-  (* hpointers : [left_pointer, right_pointer] *)
-  (* cblockpointers: [left_child_pointer, right_child_pointer] *)
-  let split_root t block_size hpointers cblockpointers tree =
-    let func lf hp cbp =
-      if lf then Node_writes.write_leaf_node t block_size hp
-      else Node_writes.write_internal_node t block_size hp cbp in
-    let ctr d lf ks pls cn bf id =
-      let dtn = if d then Attrs.get_left else Attrs.get_right in
-      if lf then Lf (dtn ks 0 (bf-1), dtn pls 0 (bf-1), false, bf, id)
-      else Il (dtn ks 0 (bf-1), dtn pls 0 (bf-1), dtn cn 0 (bf-1), false, bf, id) in
-  let ks, pls, cn, bf, id, leaf = Attrs.get_keys tree, List.init (Attrs.n_keys tree) (fun _ -> ""), Attrs.get_cn tree, 
-  Attrs.get_degree tree, Attrs.get_id tree, Attrs.is_leaf tree in
-  let id1 = Ids.find_first_free_id Ids.ids in
-  let mk, mp = List.nth ks (bf-1), List.nth pls (bf-1) in
-  let tl = ctr true leaf ks pls cn bf id1 in
-  func leaf (List.hd hpointers) (List.hd cblockpointers) tl >>= function
-  | Error _ as e -> Lwt.return e
-  | Ok () -> 
-    let id2 = Ids.find_first_free_id Ids.ids in
-    let tr = ctr false leaf ks pls cn bf id2 in
-    func leaf (List.hd (List.tl hpointers)) (List.hd (List.tl cblockpointers)) tr >>= (function
-    | Error _ as e -> Lwt.return e
-    | Ok () ->
-      let newr = (Il (mk::[], mp::[], tl::tr::[], true, bf, id)) in
-      let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
-      Node_writes.write_internal_node t block_size hpointer cblockpointer newr >>= (function
-      | Error _ as e -> Lwt.return e
-      | Ok () -> 
-        Ids.store_id (id1, (List.hd hpointers, List.hd cblockpointers));
-        Ids.store_id (id2, (List.hd (List.tl hpointers), List.hd (List.tl cblockpointers)));
-        Lwt.return @@ Ok (newr)))
-
   (* splits a node in two on a given key index *)
   (* migrates key to parent node and returns parent, which may now be full *)
   (* hpointers : [left_pointer, right_pointer, parent_pointer] *)
   (* cblockpointers: [left_child_pointer, right_child_pointer, parent_child_pointer] *)
-  let split t block_size nhpointer ncblockpointer tree parent m =
+  let split t block_size hpointers cblockpointers tree parent m =
   let func lf hp cbp =
     if lf then Node_writes.write_leaf_node t block_size hp
     else Node_writes.write_internal_node t block_size hp cbp in
-  let ctr d lf ks pls cn bf id mc =
-    let op1, op2 = if d then Attrs.get_left, Attrs.get_left_cn else Attrs.get_right, Attrs.get_right in
+  let ctr d lf ks pls cn r rs bf id mc =
+    let op1 = Attrs.(if d then get_left else get_right) in
+    let op2 mc cn = Attrs.(if d then (if rs then get_left cn 0 m else get_left_cn cn 0 m) else (if rs then get_right cn 0 m else (mc::(get_right cn 0 m)))) in
     if lf then Lf (op1 ks 0 m, op1 pls 0 m, false, bf, id)
-    else Il (op1 ks 0 m, op1 pls 0 m, (if d then (op2 cn 0 m) else mc::(op2 cn 0 m)), false, bf, id) in
-  if Attrs.is_leaf parent then raise (MalformedTree "leaf node cannot be parent")
-  else let hpointer, cblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id tree) in
-  let phpointer, pcblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id parent) in 
-  let ks, pls, cn, bf, id, cleaf = Attrs.get_keys tree, List.init (Attrs.n_keys tree) (fun _ -> ""), Attrs.get_cn tree, 
-  Attrs.get_degree tree, Attrs.get_id tree, Attrs.is_leaf tree in
-  let id1 = Ids.find_first_free_id Ids.ids in
+    else Il (op1 ks 0 m, op1 pls 0 m, op2 mc cn, r, bf, id) in
+  let root_split = Attrs.(is_root parent && equal parent tree) in
+  if Attrs.(is_leaf parent && not root_split) then raise (MalformedTree "leaf node cannot be parent")
+  else let ks, pls, cn, r, bf, id, cleaf = Attrs.(get_keys tree, List.init (n_keys tree) (fun _ -> ""), get_cn tree, is_root tree,
+  get_degree tree, get_id tree, is_leaf tree) in
+  let hpointer, cblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id parent) in
+  let hpointer1, cblockpointer1, hpointer2, cblockpointer2 = 
+    if root_split then List.hd hpointers, List.hd cblockpointers, List.hd (List.tl hpointers), List.hd (List.tl cblockpointers)
+    else let h1, cbp1 = Ids.get_node_pointers_from_id (Attrs.get_id tree) in h1, cbp1, List.hd hpointers, List.hd cblockpointers in
+  let id1 = if root_split then Ids.find_first_free_id Ids.ids else id in
   let mk, mc = List.nth ks m, (if cleaf then (Lf ([], [], false, 0, -1)) else List.nth cn m) in
-  let tl = ctr true cleaf ks pls cn bf id mc in func cleaf hpointer cblockpointer tl >>= function
+  let tl = ctr true cleaf ks pls cn r root_split bf id1 mc in func cleaf hpointer1 cblockpointer1 tl >>= function
   | Error _ -> Lwt.return @@ Error `No_space
   | Ok () ->
-    let tr = ctr false cleaf ks pls cn bf id1 mc in func cleaf nhpointer ncblockpointer tr >>= function
+    let id2 = Ids.find_first_free_id Ids.ids in
+    let tr = ctr false cleaf ks pls cn r root_split bf id2 mc in func cleaf hpointer2 cblockpointer2 tr >>= function
     | Error _ -> Lwt.return @@ Error `No_space
     | Ok () -> 
-      let nk = Attrs.n_keys parent in
-      Node_writes.node_split_update t block_size phpointer pcblockpointer nk mk nhpointer >>= function
-      | Error _ -> Lwt.return @@ Error `No_space
-      | Ok () ->
-        let updated = update_node parent mk tl tr in
-        Ids.store_id (id1, (nhpointer, ncblockpointer));
-        Lwt.return @@ Ok (updated)
+      if root_split then
+        let newr = (Il (mk::[], ""::[], tl::tr::[], true, bf, id)) in
+        Node_writes.write_internal_node t block_size hpointer cblockpointer newr >>= function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok () -> Lwt.return @@ Ok (newr) (*****************************)
+      else 
+        let nk = Attrs.n_keys parent in Node_writes.node_split_update t block_size hpointer cblockpointer nk mk hpointer2 >>= function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok () ->
+          let updated = update_node parent mk tl tr in
+          if root_split then Ids.store_id (id1, (hpointer1, cblockpointer1));
+          Ids.store_id (id2, (hpointer2, cblockpointer2));
+          Lwt.return @@ Ok (updated)
 
   (* inserts a given key into the tree *)
   let rec insert t block_size tree k v i pointers =
@@ -488,10 +468,10 @@ module Make(Sectors: Mirage_block.S) = struct
     let lim = 2*bf-1 in
     let empty, full = (Int32.equal v Int32.max_int), Attrs.n_keys tree = lim in
     if (full && root && not i) then (match pointers with
-      | p1::p2::ps when leaf -> split_root t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree >>= (function
+      | p1::p2::ps when leaf -> split t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree tree (bf-1) >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
         | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) false ps)
-      | p1::p2::p3::p4::ps when (not leaf) -> split_root t block_size [p1; p2] [p3; p4] tree >>= (function
+      | p1::p2::p3::p4::ps when (not leaf) -> split t block_size [p1; p2] [p3; p4] tree tree (bf-1) >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
         | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) false ps)
       | _ -> Lwt.return @@ Error `No_space)
@@ -507,10 +487,10 @@ module Make(Sectors: Mirage_block.S) = struct
       else let c = Tree_ops.get_child tree pkey in
       let cleaf = Attrs.is_leaf c in
       if (Attrs.n_keys c = lim) then (match pointers with
-        | p1::ps when cleaf -> split t block_size p1 Int32.max_int c tree (bf-1) >>= (function
+        | p1::ps when cleaf -> split t block_size [p1] [Int32.max_int] c tree (bf-1) >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) true ps)
-        | p1::p2::ps when (not cleaf) -> split t block_size p1 p2 c tree (bf-1) >>= (function
+        | p1::p2::ps when (not cleaf) -> split t block_size [p1] [p2] c tree (bf-1) >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) true ps)
         | _ -> Lwt.return @@ Error `No_space)
@@ -550,7 +530,7 @@ module Make(Sectors: Mirage_block.S) = struct
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok () -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
             | Error _ -> Lwt.return @@ Error `No_space
-            | Ok () -> Lwt.return @@ Ok (tr, false, fhpointer, fcblockpointer)))) in
+            | Ok () -> Lwt.return @@ Ok (tr, [fhpointer], [fcblockpointer])))) in
     let id, bf, root, leaf = Attrs.get_id parent, Attrs.get_degree parent, Attrs.is_root parent, Attrs.is_leaf parent in
     let onek, next = Attrs.n_keys parent = 1, Tree_ops.get_next parent v in
     let s1l, s2l = Attrs.is_leaf s1, Attrs.is_leaf s2 in
@@ -564,6 +544,8 @@ module Make(Sectors: Mirage_block.S) = struct
         let klen = List.length k1s + List.length k2s + 1 in
         let pm, cm = List.init klen (fun _ -> ""), (if not leaf then Attrs.get_cn s1 @ Attrs.get_cn s2 else []) in
         let id1, id2 = Attrs.get_id s1, Attrs.get_id s2 in
+        let hpointer1, cblockpointer1 = Ids.get_node_pointers_from_id id1 in
+        let hpointer2, cblockpointer2 = Ids.get_node_pointers_from_id id2 in
         if (root && onek && not iroot) then 
           (let mk = Attrs.get_hd parent in
           (Ids.remove_id id1; Ids.remove_id id2;
@@ -571,7 +553,7 @@ module Make(Sectors: Mirage_block.S) = struct
           let tr = (if leaf then (Lf (k1s @ (mk::k2s), pm, true, bf, id)) else (Il (k1s @ (mk::k2s), pm, cm, true, bf, id))) in
           func tr >>= function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok () -> Lwt.return @@ Ok (tr, true, Int32.max_int, Int32.max_int)))
+          | Ok () -> Lwt.return @@ Ok (tr, [hpointer1; hpointer2], [cblockpointer1; cblockpointer2])))
         else 
           let km = k1s @ (v::k2s) in
           let s = (if leaf then (Lf (km, pm, false, bf, id1)) else (Il (km, pm, cm, false, bf, id1))) in
@@ -585,7 +567,7 @@ module Make(Sectors: Mirage_block.S) = struct
         else if next=[] then raise (NotFound "could not find sibling nodes")
         else merge t block_size parent (List.hd next) s1 s2 ignore iroot >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (tr, change, fhp, fcbp) -> Lwt.return @@ Ok (tr, change, fhp, fcbp))
+        | Ok (tr, hps, cbps) -> Lwt.return @@ Ok (tr, hps, cbps))
 
   let rec find_predecessor tree k i = match tree with
   | Lf (v::next, _::pls, r, bf, id) ->
@@ -676,29 +658,20 @@ module Make(Sectors: Mirage_block.S) = struct
   | Il (_, _, ca::cb::_, r, bf, _) -> 
     merge t block_size tree (Attrs.get_hd tree) ca cb true r >>= (function
     | Error _ -> Lwt.return @@ Error `Not_found
-    | Ok (mt, _, hpointer, cblockpointer) -> 
+    | Ok (mt, hpointers, cblockpointers) -> 
       let mc = (match mt with
       Il (_, _, c::_, _, _, _) -> c
       | _ -> raise (MalformedTree "merge failed")) in
       let lim = (if ca=morec then (Attrs.n_keys ca - 1) else if cb=morec then bf else -1) in
       if lim = -1 then raise (MalformedTree "child node not found")
-      else split t block_size hpointer cblockpointer mc mt lim)
+      else split t block_size hpointers cblockpointers mc mt lim)
   | _ -> raise (MalformedTree "must be an internal node with the two specified child nodes")
 
   let rec delete t block_size v tree k =
     let merge_and_delete v ca cb =
       merge t block_size tree v ca cb false false >>= function
       | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (mt, _, _, _) -> (match mt with
-        | Il (_::_, _::_, _::_, true, _, _) -> delete t block_size (Attrs.get_hd mt) mt k (* a merge involving the root node could reduce tree height so we need to restart *)
-        | Il (v::next, pl::pls, c::cn, r, bf, id) -> delete t block_size (Attrs.get_hd c) c k >>= (function
-          | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, tr::cn, r, bf, id)))
-        | Il ([], [], c::[], r, bf, id) -> delete t block_size (Attrs.get_hd c) c k >>= (function
-          | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (Il ([], [], tr::[], r, bf, id)))
-        | Lf (_::_, _::_, true, _, _) -> delete t block_size (Attrs.get_hd mt) mt k
-        | _ -> raise (MalformedTree "merge failed")) in
+      | Ok (mt, _, _) -> delete t block_size (Attrs.get_hd mt) mt k in
     if Int32.(equal v max_int) then Lwt.return @@ Ok (tree) (* cannot delete anything from an empty node *)
     else let ks, pls, r, bf, id, leaf = Attrs.(get_keys tree, List.init (n_keys tree) (fun _ -> ""), is_root tree, get_degree tree, get_id tree, is_leaf tree) in
       let next = Tree_ops.get_next tree v in
