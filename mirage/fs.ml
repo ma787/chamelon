@@ -176,19 +176,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     let unused t used_blocks =
       let module IntSet = Set.Make(Int64) in
       let actual_blocks = This_Block.block_count t.block in
-      let prev_offset = !(t.lookahead).offset in
-      let alloc_size = max 16 ((min 256 actual_blocks) / 4) in
-      let this_offset =
-        if (prev_offset + alloc_size) >= This_Block.block_count t.block then 0
-        else prev_offset + alloc_size
+      let pool = IntSet.of_list @@ List.init actual_blocks
+          (fun a -> Int64.of_int @@ a)
       in
-      let pool = IntSet.of_list @@ List.init alloc_size
-          (fun a -> Int64.of_int @@ a + this_offset)
-      in
-      this_offset, IntSet.(elements @@ diff pool (of_list used_blocks))
+      0, IntSet.(elements @@ diff pool (of_list used_blocks))
 
     let populate_lookahead ~except t =
-      Traverse.follow_links t [] (Chamelon.Entry.Metadata root_pair) >|= function
+      Traverse.follow_links_tree t [] (Chamelon.Entry.Metadata root_pair) !Fs_data.btree >|= function
       | Error e ->
         Log.err (fun f -> f "error attempting to find unused blocks: %a" This_Block.pp_error e);
         Error `No_space
@@ -205,7 +199,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       (* zero or fewer blocks is a pretty easy request to fulfill *)
       if n <= 0 then Lwt.return @@ Ok []
       else begin
-        let rec aux t acc n =
+        let aux t acc n =
           match !(t.lookahead).blocks with
           (* if we have exactly enough blocks, just return the whole list *)
           | l when List.length l = n ->
@@ -223,20 +217,9 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                                    end
                 ) (Ok acc) l
             end
-          | l ->
-            (* this is our sad case: not enough blocks in the lookahead allocator
-                    to satisfy the request.
-               Claim the blocks that are there already, and try to get more;
-               if the allocator can't give us any, give up *)
-            let open Lwt_result.Infix in
-            populate_lookahead ~except:(l @ acc) t >>= function
-            | _, [] ->
-              Log.err (fun f -> f "no blocks remain free on filesystem");
-              Lwt.return @@ Error `No_space
-            | new_offset, next_l ->
-              t.lookahead := ({offset = new_offset; blocks = next_l});
-              Log.debug (fun f -> f "adding %d blocks to lookahead buffer (%a)" (List.length next_l) Fmt.(list ~sep:comma int64) next_l);
-              aux t (l @ acc) (n - (List.length l))
+          | _ ->
+            Log.err (fun f -> f "no blocks remain free on filesystem");
+            Lwt.return @@ Error `No_space
         in
         aux t [] n
       end
@@ -771,7 +754,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         | block_number::blocks ->
           let pointer = Int64.to_int32 block_number in
           let b_size = t.block_size - Fs_Btree.sizeof_pointer in
-          let to_write = max b_size (String.length data - so_far) in
+          let to_write = min b_size (String.length data - so_far) in
           let pl = String.sub data so_far to_write in
           let last = (Int.compare (so_far + to_write) (String.length data) >= 0) in
           Fs_Btree.insert_and_write t.block t.block_size tree pointer pl (List.map Int64.to_int32 blocks) last >>= (function

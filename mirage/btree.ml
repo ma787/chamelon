@@ -44,8 +44,9 @@ module Make(Sectors: Mirage_block.S) = struct
     | Lf (_, _, r, _, _) -> r
 
     let get_hd tree = match tree with
-    | Il (ks, _, _, _, _, _) -> List.hd ks
-    | Lf (ks, _, _, _, _) -> List.hd ks
+    | Il (k::_, _, _, _, _, _) -> k
+    | Lf (k::_, _, _, _, _) -> k
+    | _ -> Int32.max_int
 
     let get_keys tree = match tree with
     | Il (ks, _, _, _, _, _) -> ks
@@ -58,6 +59,10 @@ module Make(Sectors: Mirage_block.S) = struct
     let get_cn tree = match tree with
     | Il (_, _, cn, _, _, _) -> cn
     | _ -> []
+
+    let get_degree tree = match tree with
+    | Il (_, _, _, _, bf, _) -> bf
+    | Lf (_, _, _, bf, _) -> bf
 
     let get_id tree = match tree with
     | Il (_, _, _, _, _, id) -> id
@@ -97,6 +102,60 @@ module Make(Sectors: Mirage_block.S) = struct
     | [] -> []
     end
 
+  module Tree_ops = struct
+    let restore tree k p c = match tree with
+    | Lf ([], [], r, bf, id) -> Lf (k::[], p::[], r, bf, id)
+    | Lf (v::next, pl::pls, r, bf, id) -> Lf (k::v::next, p::pl::pls, r, bf, id)
+    | Il ([], [], cn, r, bf, id) -> Il (k::[], p::[], c::cn, r, bf, id)
+    | Il (v::next, pl::pls, cn, r, bf, id) -> Il (k::v::next, p::pl::pls, c::cn, r, bf, id)
+    | _ -> raise (MalformedTree "keys/payloads/children mismatch")
+
+    let rec get_next tree k = match tree with
+    | Il (v::next, _::pls, _::cn, r, t, id) ->
+      if v=k then try [List.hd next] with Failure _ -> []
+      else get_next (Il (next, pls, cn, r, t, id)) k
+    | Il ([], _, _, _, _, _) -> []
+    | Lf (v::next, _::pls, r, t, id) ->
+      if v=k then try [List.hd next] with Failure _ -> []
+      else get_next (Lf (next, pls, r, t, id)) k
+    | Lf ([], _, _, _, _) -> []
+    | _ -> raise (MalformedTree "invalid tree structure")
+
+    let rec get_child tree kl = 
+      if Attrs.is_leaf tree then (Lf ([], [], false, 0, -1))
+      else match kl with
+    | [] -> (match tree with
+      | Il (_::next, _::pls, _::cn, r, t, id) -> get_child (Il (next, pls, cn, r, t, id)) kl
+      | Il ([], [], c::[], _, _, _) -> c
+      | _ -> raise (MalformedTree ""))
+    | k::_ -> (match tree with
+      | Il (v::next, _::pls, c::cn, r, t, id) ->
+        if v=k then c else get_child (Il (next, pls, cn, r, t, id)) kl
+      | Il ([], [], _::[], _, _, _) -> raise (NotFound "child node not found")
+      | _ -> raise (MalformedTree ""))
+    
+    let rec replace_child tree kl newc =
+      if Attrs.is_leaf tree then (Lf ([], [], false, 0, -1))
+      else match kl with
+    | [] -> (match tree with
+      | Il (v::next, pl::pls, c::cn, r, t, id) -> restore (replace_child (Il (next, pls, cn, r, t, id)) kl newc) v pl c
+      | Il ([], [], _::[], r, t, id) -> Il ([], [], newc::[], r, t, id)
+      | _ -> raise (MalformedTree ""))
+    | k::_ -> (match tree with
+      | Il (v::next, pl::pls, c::cn, r, t, id) ->
+        if v=k then (Il (v::next, pl::pls, newc::cn, r, t, id)) else restore (replace_child (Il (next, pls, cn, r, t, id)) kl newc) v pl c
+      | Il ([], [], _::[], _, _, _) -> raise (NotFound "child node not found")
+      | _ -> raise (MalformedTree ""))
+    
+    let rec replace_and_remove tree kl newc =
+      match kl with
+    | [] -> raise (NotFound "merge key not given")
+    | k::_ -> (match tree with
+      | Il (v::next, pl::pls, c1::c2::cn, r, t, id) ->
+        if v=k then (Il (next, pls, newc::cn, r, t, id)) else restore (replace_and_remove (Il (next, pls, (c2::cn), r, t, id)) kl newc) v pl c1
+      | _ -> raise (NotFound "merge key to remove not found"))
+    end
+  
   module Ids = struct
     let ids = ref []
     let store_id (id, (hpointer, cblockpointer)) =
@@ -190,7 +249,7 @@ module Make(Sectors: Mirage_block.S) = struct
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let id = Int32.to_int (Cstruct.LE.get_uint32 hblock 0) in
-        if (pointer=2L && id != 1) then Lwt.return @@ Ok (Lf ([], [], true, bf, 1))
+        if (pointer=2L && id != 1) then (Ids.ids := [(1, (2l, Int32.max_int))]; Lwt.return @@ Ok (Lf ([], [], true, bf, 1)))
         else let cblockpointer = Cstruct.LE.get_uint32 hblock sizeof_pointer in
         let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
         let keys = List.sort Int32.compare (read_pointers hblock [] ((nk-1) + 3) 3) in
@@ -312,19 +371,12 @@ module Make(Sectors: Mirage_block.S) = struct
         | Error _ -> Lwt.return @@ Error `No_space)
   end
 
-  let restore tree k p c = match tree with
-  | Lf ([], [], r, bf, id) -> Lf (k::[], p::[], r, bf, id)
-  | Lf (v::next, pl::pls, r, bf, id) -> Lf (k::v::next, p::pl::pls, r, bf, id)
-  | Il ([], [], cn, r, bf, id) -> Il (k::[], p::[], c::cn, r, bf, id)
-  | Il (v::next, pl::pls, cn, r, bf, id) -> Il (k::v::next, p::pl::pls, c::cn, r, bf, id)
-  | _ -> raise (MalformedTree "keys/payloads/children mismatch")
-
   (* searches for a node with key k and returns node *)
   let rec search tree k = let eq a b = a=b in
   let search_next tnode ks nv npl nc  = let tnext = search tnode k in (match tnext with
-  | Il ([], [], _::[], _, _, _) -> restore tnext nv npl nc
+  | Il ([], [], _::[], _, _, _) -> Tree_ops.restore tnext nv npl nc
   | Il (v::_, _::_, _::_, _, _, _) -> 
-    if List.exists (eq v) ks then restore tnext nv npl nc else tnext
+    if List.exists (eq v) ks then Tree_ops.restore tnext nv npl nc else tnext
   | _ -> tnext) in
   match tree with
   | Il (v::next, pl::pls, c::cn, r, bf, id) -> 
@@ -336,28 +388,19 @@ module Make(Sectors: Mirage_block.S) = struct
     if k=v then tree
     else if k>v then
       if next=[] then raise (NotFound ("key not found"))
-      else restore (search (Lf (next, pls, r, bf, id)) k) v pl (Lf ([], [], false, 0, -1))
+      else Tree_ops.restore (search (Lf (next, pls, r, bf, id)) k) v pl (Lf ([], [], false, 0, -1))
     else raise (NotFound "key not found")
   | _ -> raise (NotFound "key not found")
 
-  let rec search_by_id tree i = match tree with
-  | Il (_::next, _::pls, c::cn, r, bf, id) -> 
-    if id=i then (tree, true) 
-    else let (tr1, f1) = search_by_id c i in
-      if f1 then (tr1, f1) else search_by_id (Il (next, pls, cn, r, bf, id)) i
-  | Il (_, _, c::[], _, _, _) -> search_by_id c i
-  | Lf (_, _, _, _, id) -> if id=i then (tree, true) else (tree, false)
-  | _ -> raise (MalformedTree "")
-
   (* adds a key and child to a node *)
   (* key must not already be in the node *)
-  let rec update_node block_size tree k c1 c2 = match tree with
+  let rec update_node tree k c1 c2 = match tree with
   | Il (v::next, pl::pls, c::cn, r, bf, id) -> 
     if Attrs.is_leaf c1 != Attrs.is_leaf c then
       raise (MalformedTree "child type mismatch")
     else if Attrs.get_hd c1 = Attrs.get_hd c then
       Il (k::v::next, ""::pl::pls, c1::c2::cn, r, bf, id)
-    else restore (update_node block_size (Il (next, pls, cn, r, bf, id)) k c1 c2) v pl c
+    else Tree_ops.restore (update_node (Il (next, pls, cn, r, bf, id)) k c1 c2) v pl c
   | Il ([], [], c::cn, r, bf, id) -> (* right-most node *)
     if Attrs.is_leaf c1 != Attrs.is_leaf c then 
       raise (MalformedTree "child type mismatch")
@@ -370,176 +413,113 @@ module Make(Sectors: Mirage_block.S) = struct
   (* hpointers : [left_pointer, right_pointer] *)
   (* cblockpointers: [left_child_pointer, right_child_pointer] *)
   let split_root t block_size hpointers cblockpointers tree =
-  let id1 = Ids.find_first_free_id Ids.ids in match tree with
-  | Il (ks, pls, c::cn, true, bf, id) -> 
-    (let mk, mp = List.nth ks (bf-1), List.nth pls (bf-1) in
-    let tl = Il (Attrs.get_left ks 0 (bf-1), Attrs.get_left pls 0 (bf-1), c::(Attrs.get_left cn 0 (bf-1)), false, bf, id1) in
-    Node_writes.write_internal_node t block_size (List.hd hpointers) (List.hd cblockpointers) tl >>= function
-    | Error _ as e -> Lwt.return e
-    | Ok () -> 
-      let id2 = Ids.find_first_free_id Ids.ids in
-      let tr = Il (Attrs.get_right ks 0 (bf-1), Attrs.get_right pls 0 (bf-1), Attrs.get_right (c::cn) 0 (bf-1), false, bf, id2) in
-      Node_writes.write_internal_node t block_size (List.hd (List.tl hpointers)) (List.hd (List.tl cblockpointers)) tr >>= (function
-      | Error _ as e -> Lwt.return e
-      | Ok () ->
-        let newr = (Il (mk::[], mp::[], tl::tr::[], true, bf, id)) in
-        let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
-        Node_writes.write_internal_node t block_size hpointer cblockpointer newr >>= (function
-        | Error _ as e -> Lwt.return e
-        | Ok () -> 
-          Ids.store_id (id1, (List.hd hpointers, List.hd cblockpointers));
-          Ids.store_id (id2, (List.hd (List.tl hpointers), List.hd (List.tl cblockpointers)));
-          Lwt.return @@ Ok (newr))))
-  | Lf (ks, pls, _, bf, id) -> 
-    (let mk, mp = List.nth ks (bf-1), List.nth pls (bf-1) in
-    let tl = Lf (Attrs.get_left ks 0 (bf-1), Attrs.get_left pls 0 (bf-1), false, bf, id1) in
-    Node_writes.write_leaf_node t block_size (List.hd hpointers) tl >>= function
+    let func lf hp cbp =
+      if lf then Node_writes.write_leaf_node t block_size hp
+      else Node_writes.write_internal_node t block_size hp cbp in
+    let ctr d lf ks pls cn bf id =
+      let dtn = if d then Attrs.get_left else Attrs.get_right in
+      if lf then Lf (dtn ks 0 (bf-1), dtn pls 0 (bf-1), false, bf, id)
+      else Il (dtn ks 0 (bf-1), dtn pls 0 (bf-1), dtn cn 0 (bf-1), false, bf, id) in
+  let ks, pls, cn, bf, id, leaf = Attrs.get_keys tree, List.init (Attrs.n_keys tree) (fun _ -> ""), Attrs.get_cn tree, 
+  Attrs.get_degree tree, Attrs.get_id tree, Attrs.is_leaf tree in
+  let id1 = Ids.find_first_free_id Ids.ids in
+  let mk, mp = List.nth ks (bf-1), List.nth pls (bf-1) in
+  let tl = ctr true leaf ks pls cn bf id1 in
+  func leaf (List.hd hpointers) (List.hd cblockpointers) tl >>= function
+  | Error _ as e -> Lwt.return e
+  | Ok () -> 
+    let id2 = Ids.find_first_free_id Ids.ids in
+    let tr = ctr false leaf ks pls cn bf id2 in
+    func leaf (List.hd (List.tl hpointers)) (List.hd (List.tl cblockpointers)) tr >>= (function
     | Error _ as e -> Lwt.return e
     | Ok () ->
-      let id2 = Ids.find_first_free_id Ids.ids in
-      let tr = Lf (Attrs.get_right ks 0 (bf-1), Attrs.get_right pls 0 (bf-1), false, bf, id2) in
-      Node_writes.write_leaf_node t block_size (List.hd (List.tl hpointers)) tr >>= (function
+      let newr = (Il (mk::[], mp::[], tl::tr::[], true, bf, id)) in
+      let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
+      Node_writes.write_internal_node t block_size hpointer cblockpointer newr >>= (function
       | Error _ as e -> Lwt.return e
-      | Ok () ->
-        let newr = (Il (mk::[], mp::[], tl::tr::[], true, bf, id)) in
-        let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
-        Node_writes.write_internal_node t block_size hpointer cblockpointer newr >>= (function
-        | Error _ as e -> Lwt.return e
-        | Ok () -> 
-          Ids.store_id (id1, (List.hd hpointers, List.hd cblockpointers));
-          Ids.store_id (id2, (List.hd (List.tl hpointers), List.hd (List.tl cblockpointers)));
-          Lwt.return @@ Ok (newr))))
-  | _ -> raise (NullTree "")
+      | Ok () -> 
+        Ids.store_id (id1, (List.hd hpointers, List.hd cblockpointers));
+        Ids.store_id (id2, (List.hd (List.tl hpointers), List.hd (List.tl cblockpointers)));
+        Lwt.return @@ Ok (newr)))
 
   (* splits a node in two on a given key index *)
   (* migrates key to parent node and returns parent, which may now be full *)
   (* hpointers : [left_pointer, right_pointer, parent_pointer] *)
   (* cblockpointers: [left_child_pointer, right_child_pointer, parent_child_pointer] *)
   let split t block_size nhpointer ncblockpointer tree parent m =
+  let func lf hp cbp =
+    if lf then Node_writes.write_leaf_node t block_size hp
+    else Node_writes.write_internal_node t block_size hp cbp in
+  let ctr d lf ks pls cn bf id mc =
+    let op1, op2 = if d then Attrs.get_left, Attrs.get_left_cn else Attrs.get_right, Attrs.get_right in
+    if lf then Lf (op1 ks 0 m, op1 pls 0 m, false, bf, id)
+    else Il (op1 ks 0 m, op1 pls 0 m, (if d then (op2 cn 0 m) else mc::(op2 cn 0 m)), false, bf, id) in
   if Attrs.is_leaf parent then raise (MalformedTree "leaf node cannot be parent")
-  else let id1 = Ids.find_first_free_id Ids.ids in 
-  let hpointer, cblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id tree) in
-  let phpointer, pcblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id parent) in match tree with
-  | Il (ks, pls, c::cn, _, bf, id) ->
-    (let mk, mc = List.nth ks m, List.nth cn m in
-    let tl = Il (Attrs.get_left ks 0 m, Attrs.get_left pls 0 m, Attrs.get_left_cn (c::cn) 0 m, false, bf, id) in
-    Node_writes.write_internal_node t block_size hpointer cblockpointer tl >>= function
+  else let hpointer, cblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id tree) in
+  let phpointer, pcblockpointer = Ids.get_node_pointers_from_id (Attrs.get_id parent) in 
+  let ks, pls, cn, bf, id, cleaf = Attrs.get_keys tree, List.init (Attrs.n_keys tree) (fun _ -> ""), Attrs.get_cn tree, 
+  Attrs.get_degree tree, Attrs.get_id tree, Attrs.is_leaf tree in
+  let id1 = Ids.find_first_free_id Ids.ids in
+  let mk, mc = List.nth ks m, (if cleaf then (Lf ([], [], false, 0, -1)) else List.nth cn m) in
+  let tl = ctr true cleaf ks pls cn bf id mc in func cleaf hpointer cblockpointer tl >>= function
+  | Error _ -> Lwt.return @@ Error `No_space
+  | Ok () ->
+    let tr = ctr false cleaf ks pls cn bf id1 mc in func cleaf nhpointer ncblockpointer tr >>= function
     | Error _ -> Lwt.return @@ Error `No_space
     | Ok () -> 
-      let tr = Il (Attrs.get_right ks 0 m, Attrs.get_right pls 0 m, mc::(Attrs.get_right cn 0 m), false, bf, id1) in
-      Node_writes.write_internal_node t block_size nhpointer ncblockpointer tr >>= (function
+      let nk = Attrs.n_keys parent in
+      Node_writes.node_split_update t block_size phpointer pcblockpointer nk mk nhpointer >>= function
       | Error _ -> Lwt.return @@ Error `No_space
       | Ok () ->
-        let nk = Attrs.n_keys parent in
-        Node_writes.node_split_update t block_size phpointer pcblockpointer nk mk nhpointer >>= (function
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok () ->
-          let updated = update_node block_size parent mk tl tr in
-          Ids.store_id (id1, (nhpointer, ncblockpointer));
-          Lwt.return @@ Ok (updated))))
-  | Lf (ks, pls, _, bf, id) ->
-    (let mk = List.nth ks m in
-    let tl = Lf (Attrs.get_left ks 0 m, Attrs.get_left pls 0 m, false, bf, id) in
-    Node_writes.write_leaf_node t block_size hpointer tl >>= function
-    | Error _ -> Lwt.return @@ Error `No_space
-    | Ok () ->
-      let tr = Lf (Attrs.get_right ks 0 m, Attrs.get_right pls 0 m, false, bf, id1) in
-      Node_writes.write_leaf_node t block_size nhpointer tr >>= (function
-      | Error _ -> Lwt.return @@ Error `No_space
-      | Ok () -> 
-        let nk = Attrs.n_keys parent in
-        Node_writes.node_split_update t block_size phpointer pcblockpointer nk mk nhpointer >>= (function
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok () ->
-          let updated = update_node block_size parent mk tl tr in
-          Ids.store_id (id1, (nhpointer, ncblockpointer));
-          Lwt.return @@ Ok (updated))))
-  | _ -> raise (NullTree "")
+        let updated = update_node parent mk tl tr in
+        Ids.store_id (id1, (nhpointer, ncblockpointer));
+        Lwt.return @@ Ok (updated)
 
-  (* inserts a given key and payload into the tree *)
-  let rec insert t block_size tree k i pointers =
-    match tree with
-  | Lf (v::next, pl::pls, r, bf, id) ->
-    let l = (List.length (v::next) == 2*bf-1) in
-    if (l && r && not i) then (match pointers with
-      | p1::p2::ps -> split_root t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree >>= (function
+  (* inserts a given key into the tree *)
+  let rec insert t block_size tree k v i pointers =
+    let insert_key tree k = match tree with
+      | Lf (ks, pls, r, bf, id) -> Lf (k::ks, ""::pls, r, bf, id)
+      | _ -> raise (MalformedTree "") in
+    let id, bf, root, leaf = Attrs.get_id tree, Attrs.get_degree tree, Attrs.is_root tree, Attrs.is_leaf tree in
+    let lim = 2*bf-1 in
+    let empty, full = (Int32.equal v Int32.max_int), Attrs.n_keys tree = lim in
+    if (full && root && not i) then (match pointers with
+      | p1::p2::ps when leaf -> split_root t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (tr) -> insert t block_size tr k false ps)
+        | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) false ps)
+      | p1::p2::p3::p4::ps when (not leaf) -> split_root t block_size [p1; p2] [p3; p4] tree >>= (function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) false ps)
       | _ -> Lwt.return @@ Error `No_space)
-    else if (l && not r) then raise (MalformedTree "full node not split ahead of time")
-    else if k<v then Lwt.return @@ Ok (Lf (k::v::next, ""::pl::pls, r, bf, id), id, false, pointers)
-    else if k=v then Lwt.return @@ Ok (tree, id, true, pointers) (* update payload *)
-    else if next=[] then Lwt.return @@ Ok (Lf (v::k::next, pl::""::pls, r, bf, id), id, false, pointers)
-    else insert t block_size (Lf (next, pls, r, bf, id)) k false pointers >>= (function
-      | Error _ -> Lwt.return @@ Error `No_space
-      | Ok (tr, tr_id, update, ps) -> 
-        let r_tr = restore tr v pl (Lf ([], [], false, 0, 0)) in
-        Lwt.return @@ Ok (r_tr, tr_id, update, ps))
-  | Lf ([], [], true, bf, id) -> Lwt.return @@ Ok (Lf (k::[], ""::[], true, bf, id), id, false, pointers)
-  | Il (v::next, pl::pls, c1::c2::cn, r, bf, id) -> (* every non-leaf node must have at least 2 children *)
-    let l = (List.length(v::next) == 2*bf-1) in
-    if (l && r && not i) then (
-      if Attrs.is_leaf c1 then (match pointers with
-        | p1::p2::ps -> split_root t block_size [p1; p2] [Int32.max_int; Int32.max_int] tree >>= (function
+    else if (full && not root) then raise (MalformedTree "full node not split ahead of time")
+    else if (empty && root) then Lwt.return @@ Ok (insert_key tree k, id, false, pointers)
+    else if k=v then Lwt.return @@ Ok (tree, id, true, pointers)
+    else let next = Tree_ops.get_next tree v in
+      if (k>v && next != []) then insert t block_size tree k (List.hd (Tree_ops.get_next tree v)) false pointers >>= (function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok (tr, tr_id, update, ps) -> Lwt.return @@ Ok (tr, tr_id, update, ps))
+      else let pkey = if k<v then [v] else [] in 
+      if leaf then Lwt.return @@ Ok (insert_key tree k, id, false, pointers)
+      else let c = Tree_ops.get_child tree pkey in
+      let cleaf = Attrs.is_leaf c in
+      if (Attrs.n_keys c = lim) then (match pointers with
+        | p1::ps when cleaf -> split t block_size p1 Int32.max_int c tree (bf-1) >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
-          | Ok (tr) -> insert t block_size tr k false ps)
+          | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) true ps)
+        | p1::p2::ps when (not cleaf) -> split t block_size p1 p2 c tree (bf-1) >>= (function
+          | Error _ -> Lwt.return @@ Error `No_space
+          | Ok (tr) -> insert t block_size tr k (Attrs.get_hd tr) true ps)
         | _ -> Lwt.return @@ Error `No_space)
-      else match pointers with
-      | p1::p2::p3::p4::ps -> split_root t block_size [p1; p2] [p3; p4] tree >>= (function
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (tr) -> insert t block_size tr k false ps)
-      | _ -> Lwt.return @@ Error `No_space) (* root is full *)
-    else if (l && not r) then raise (MalformedTree "parent node cannot be full")
-    else if k<v then match c1 with
-      | Il (k1s, _, _, _, _, _) -> 
-        if List.length k1s == 2*bf-1 then (match pointers with
-          | p1::p2::ps -> split t block_size p1 p2 c1 tree (bf-1) >>= (function
-            | Error _ -> Lwt.return @@ Error `No_space
-            | Ok (tr) -> insert t block_size tr k true ps)
-          | _ -> Lwt.return @@ Error `No_space)
-        else insert t block_size c1 k false pointers >>= (function 
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update, ps))
-      | Lf (k1s, _, _, _, _) -> 
-        if List.length k1s == 2*bf-1 then (match pointers with
-          | p1::ps -> split t block_size p1 Int32.max_int c1 tree (bf-1) >>= (function
-            | Error _ -> Lwt.return @@ Error `No_space
-            | Ok (tr) -> insert t block_size tr k true ps)
-          | _ -> Lwt.return @@ Error `No_space)
-        else insert t block_size c1 k false pointers >>= (function 
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c::c2::cn, r, bf, id), c_id, update, ps))
-    else if k=v then Lwt.return @@ Ok (tree, id, true, pointers) (* update payload *)
-    else if next=[] then match c2 with (* rightmost child *)
-      | Il (k2s, _, _, _, _, _) ->
-        if List.length k2s == 2*bf-1 then (match pointers with
-          | p1::p2::ps -> split t block_size p1 p2 c2 tree (bf-1) >>= (function
-            | Error _ -> Lwt.return @@ Error `No_space
-            | Ok (tr) -> insert t block_size tr k true ps)
-          | _ -> Lwt.return @@ Error `No_space)
-        else insert t block_size c2 k false pointers >>= (function 
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update, ps))
-      | Lf (k2s, _, _, _, _) ->
-        if List.length k2s == 2*bf-1 then (match pointers with
-          | p1::ps -> split t block_size p1 Int32.max_int c2 tree (bf-1) >>= (function
-            | Error _ -> Lwt.return @@ Error `No_space
-            | Ok (tr) -> insert t block_size tr k true ps)
-          | _ -> Lwt.return @@ Error `No_space)
-        else insert t block_size c2 k false pointers >>= (function 
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok (c, c_id, update, ps) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::c::cn, r, bf, id), c_id, update, ps))
-    else (insert t block_size (Il (next, pls, c2::cn, r, bf, id)) k false pointers >>= function
-    | Error _ -> Lwt.return @@ Error `No_space
-    | Ok (tr, tr_id, update, ps) -> Lwt.return @@ Ok (restore tr v pl c1, tr_id, update, ps))
-  | _ -> raise (MalformedTree "internal node cannot be empty or without children")
+      else insert t block_size c k (Attrs.get_hd c) false pointers >>= (function 
+      | Error _ -> Lwt.return @@ Error `No_space
+      | Ok (newc, c_id, update, ps) -> Lwt.return @@ Ok (Tree_ops.replace_child tree pkey newc, c_id, update, ps))
 
   let insert_and_write t block_size tree k pl pointers last =
     let write_block t block_size k next pl tr ps =
       Serial.write_data_block_from_pl t block_size (Int64.of_int32 k) next pl >>= function
       | Error _ -> Lwt.return @@ Error `No_space
       | Ok () -> Lwt.return @@ Ok (tr, ps) in
-    insert t block_size tree k false pointers >>= function
+    insert t block_size tree k (Attrs.get_hd tree) false pointers >>= function
     | Error _ -> Lwt.return @@ Error `No_space
     | Ok (tr, tr_id, update, ps) ->
       let next = if (ps=[] || last) then Int32.max_int else List.hd ps in
@@ -553,7 +533,7 @@ module Make(Sectors: Mirage_block.S) = struct
       else write_block t block_size k next pl tr ps
 
   (* takes two child nodes and merges them into one node *)
-  let rec merge t block_size parent s1 s2 ignore iroot l = 
+  let rec merge t block_size parent v s1 s2 ignore iroot = 
     let confirm_merge hpointer cblockpointer k nk cid tr =
       let fhpointer, fcblockpointer = Ids.get_node_pointers_from_id cid in
       Ids.remove_id cid; (* node id id2 is now unused *)
@@ -566,58 +546,42 @@ module Make(Sectors: Mirage_block.S) = struct
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok () -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
             | Error _ -> Lwt.return @@ Error `No_space
-            | Ok () -> Lwt.return @@ Ok (tr, false, fhpointer, fcblockpointer))))
-    in match parent with
-  | Lf _ -> raise (MalformedTree "leaf node cannot be parent")
-  | Il (v::next, pl::pls, c1::c2::cn, r, bf, id) -> 
-    if (c1=s1 && c2=s2) then match s1, s2 with
-      | Lf _, Il _ -> raise (MalformedTree "nodes must be at same level")
-      | Il _, Lf _ -> raise (MalformedTree "nodes must be at same level")
-      | Lf (k1s, p1s, false, _, id1), Lf (k2s, p2s, false, _, id2) ->
-      if r && (l + (List.length (v::next)) = 1) && not iroot then
-        (Ids.remove_id id1; Ids.remove_id id2; (* node ids id1 and id2 now unused *)
-        let tr = Lf (k1s @ (v::k2s), p1s @ (pl::p2s), true, bf, id) in
-        let hpointer, _cblockpointer = Ids.get_node_pointers_from_id id in
-        Node_writes.write_leaf_node t block_size hpointer tr >>= function
-        | Error _ -> Lwt.return @@ Error `No_space
-        | Ok () -> Lwt.return @@ Ok (tr, true, Int32.max_int, Int32.max_int)) (* new root can be written to disk *)
-      else
-        (let km, pm = k1s @ (v::k2s), p1s @ (pl::p2s) in (* TODO: concatenate lists without @ *)
-        let l = List.length km in 
-        if ((l < bf-1 || l > 2*bf-1) && not ignore) then raise (TreeCapacityNotMet "")
-        else let s = Lf (km, pm, false, bf, id1) in
-        let tr = Il (next, pls, s::cn, r, bf, id) in
-        let hpointer, _cblockpointer = Ids.get_node_pointers_from_id id1 in
-        let ppointer, pcblockpointer = Ids.get_node_pointers_from_id id in
-        if not ignore then (Node_writes.write_leaf_node t block_size hpointer s >>= function (* can only write new child nodes if this is a real merge and not a steal *)
-          | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () -> confirm_merge ppointer pcblockpointer v (Attrs.n_keys parent) id2 tr)
-        else confirm_merge ppointer pcblockpointer v (Attrs.n_keys parent) id2 tr)
-      | Il (k1s, p1s, cn1, false, _, id1), Il (k2s, p2s, cn2, false, _, id2) ->
-        if r && (l + (List.length (v::next)) = 1) && not iroot then
+            | Ok () -> Lwt.return @@ Ok (tr, false, fhpointer, fcblockpointer)))) in
+    let id, bf, root, leaf = Attrs.get_id parent, Attrs.get_degree parent, Attrs.is_root parent, Attrs.is_leaf parent in
+    let onek, next = Attrs.n_keys parent = 1, Tree_ops.get_next parent v in
+    let s1l, s2l = Attrs.is_leaf s1, Attrs.is_leaf s2 in
+    if ((s1l && (not s2l)) || ((not s1l) && s2l)) then raise (MalformedTree "nodes must be at same level")
+    else if leaf then raise (MalformedTree "leaf node cannot be parent")
+    else 
+      let m1, m2 = Tree_ops.get_child parent [v] = s1, (next != [] && Tree_ops.get_child parent next = s2) in
+      if m1 && m2 then
+        (let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
+        let k1s, k2s = Attrs.get_keys s1, Attrs.get_keys s2 in
+        let klen = List.length k1s + List.length k2s + 1 in
+        let pm, cm = List.init klen (fun _ -> ""), (if not leaf then Attrs.get_cn s1 @ Attrs.get_cn s2 else []) in
+        let id1, id2 = Attrs.get_id s1, Attrs.get_id s2 in
+        if (root && onek && not iroot) then 
+          (let mk = Attrs.get_hd parent in
           (Ids.remove_id id1; Ids.remove_id id2;
-          let tr = Il (k1s @ (v::k2s), p1s @ (pl::p2s), cn1 @ cn2, r, bf, id) in
-          let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
-          Node_writes.write_internal_node t block_size hpointer cblockpointer tr >>= function
-          | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () -> Lwt.return @@ Ok (tr, true, Int32.max_int, Int32.max_int))
-        else
-          (let km, pm, cm = k1s @ (v::k2s), p1s @ (pl::p2s), cn1 @ cn2 in
-          let l = List.length k1s in
-          if (l < bf-1 || l > 2*bf-1) then raise (TreeCapacityNotMet "")
-          else let s = Il (km, pm, cm, false, bf, id1) in
-          let tr = Il (next, pls, s::cn, r, bf, id) in
-          let hpointer, cblockpointer = Ids.get_node_pointers_from_id id1 in
-          let ppointer, pcblockpointer = Ids.get_node_pointers_from_id id in
-          if not ignore then (Node_writes.write_internal_node t block_size hpointer cblockpointer s >>= function
-          | Error _ -> Lwt.return @@ Error `No_space
-          | Ok () -> confirm_merge ppointer pcblockpointer v (Attrs.n_keys parent) id2 tr)
-          else confirm_merge ppointer pcblockpointer v (Attrs.n_keys parent) id2 tr)
-      | _, _ -> raise (MalformedTree "child nodes cannot be empty")
-    else (merge t block_size (Il (next, pls, (c2::cn), r, bf, id)) s1 s2 ignore iroot (l+1) >>= function
-    | Error _ -> Lwt.return @@ Error `No_space
-    | Ok (tr, change, fhp, fcbp) -> Lwt.return @@ Ok (restore tr v pl c1, change, fhp, fcbp))
-  | _ -> raise (NotFound "could not find sibling nodes") (* occurs if s1 and s2 are not child nodes of given parent *)
+          let func = Node_writes.(if leaf then write_leaf_node t block_size hpointer else write_internal_node t block_size hpointer cblockpointer) in
+          let tr = (if leaf then (Lf (k1s @ (mk::k2s), pm, true, bf, id)) else (Il (k1s @ (mk::k2s), pm, cm, true, bf, id))) in
+          func tr >>= function
+          | Error _ -> Lwt.return @@ Error `Not_found
+          | Ok () -> Lwt.return @@ Ok (tr, true, Int32.max_int, Int32.max_int)))
+        else 
+          let km = k1s @ (v::k2s) in
+          let s = (if leaf then (Lf (km, pm, false, bf, id1)) else (Il (km, pm, cm, false, bf, id1))) in
+          let tr = Tree_ops.replace_and_remove parent [v] s in
+          let chpointer, ccblockpointer = Ids.get_node_pointers_from_id id1 in
+          let func = Node_writes.(if leaf then write_leaf_node t block_size chpointer else write_internal_node t block_size chpointer ccblockpointer) in
+          if not ignore then (func tr >>= function
+            | Error _ -> Lwt.return @@ Error `Not_found
+            | Ok () -> confirm_merge hpointer cblockpointer v (Attrs.n_keys parent) id2 tr)
+          else confirm_merge hpointer ccblockpointer v (Attrs.n_keys parent) id2 tr)
+        else if next=[] then raise (NotFound "could not find sibling nodes")
+        else merge t block_size parent (List.hd next) s1 s2 ignore iroot >>= (function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok (tr, change, fhp, fcbp) -> Lwt.return @@ Ok (tr, change, fhp, fcbp))
 
   let rec find_predecessor tree k i = match tree with
   | Lf (v::next, _::pls, r, bf, id) ->
@@ -669,68 +633,44 @@ module Make(Sectors: Mirage_block.S) = struct
 
   (* swaps the positions of keys 'ok' and 'nk' in a tree *)
   (* nk must be either the predecessor or successor of ok and must be at a lower depth *)
-  let rec swap_i t block_size tree ok nk i = 
-    let replace id ok nk tr opt =
-      let hpointer, _cpointer = Ids.get_node_pointers_from_id id in
-      Block_ops.replace_key_in_head_block t block_size (Int64.of_int32 hpointer) ok nk >>= function
+  let rec swap_i t block_size tree ok nk v found index = 
+    let swap_child kl f = let c = Tree_ops.get_child tree kl in swap_i t block_size c (Attrs.get_hd c) ok nk f 0 in
+    let swap_next n i = swap_i t block_size tree ok nk (List.hd n) i (index+1) in
+    let id, bf, r, leaf = Attrs.get_id tree, Attrs.get_degree tree, Attrs.is_root tree, Attrs.is_leaf tree in
+    let ks, pls, next = Attrs.get_keys tree, List.init (Attrs.n_keys tree) (fun _ -> ""), Tree_ops.get_next tree v in
+    let replace cond =
+      let hpointer, cblockpointer = Ids.get_node_pointers_from_id id in
+      let func =
+        if cond then fun _ -> Lwt.return @@ Ok ()
+        else if leaf then Node_writes.write_leaf_node t block_size hpointer 
+        else Node_writes.write_internal_node t block_size hpointer cblockpointer in
+      func tree >>= (function
+        | Error _ -> Lwt.return @@ Error `Not_found
+        | Ok () -> Lwt.return @@ Ok ()) in
+    if v=nk then
+      if (found=0 || not leaf) then raise (MalformedTree "order violation")
+      else let newks = List.mapi (fun i k -> if i=index then ok else k) ks in 
+      let tr = Lf (newks, pls, r, bf, id) in replace (found=1) >>= function
       | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
+      | Ok () -> Lwt.return @@ Ok (tr)
+    else if (v=ok || found>0) then
+      if (next=[] && leaf) then raise (NotFound "one key not found")
+      else replace (found != 0) >>= function
         | Error _ -> Lwt.return @@ Error `Not_found
         | Ok () -> 
-          if opt=0 then Lwt.return @@ Ok (tr)
-          else if opt=1 then swap_i t block_size tr ok nk true >>= (function
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> Lwt.return @@ Ok (restore tr nk "" (Lf ([], [], false, 0, 0))))
-          else (match tr with
-            | Il (_::next, pl::pls, c1::c2::cn, r, bf, id) ->
-              let ex1 = if nk>ok then swap_i t block_size c1 ok nk else swap_i t block_size c2 ok nk in ex1 true >>= (function
-              | Error _ -> Lwt.return @@ Error `Not_found
-              | Ok (tr) -> (if nk>ok then Lwt.return @@ Ok (Il (nk::next, pl::pls, c1::tr::cn, r, bf, id))
-              else Lwt.return @@ Ok (Il (nk::next, pl::pls, tr::c2::cn, r, bf, id))))
-            | _ -> raise (MalformedTree "")))
-    in match tree with
-  | Lf (v::next, pl::pls, r, bf, id) ->
-    if i then
-      if v=nk then (replace (Attrs.get_id tree) nk ok (Lf (ok::next, pl::pls, r, bf, id)) 0)
-      else if next=[] then raise (NotFound "at least one key to swap not found")
-      else swap_i t block_size (Lf (next, pls, r, bf, id)) ok nk i >>= function
-      | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl (Lf ([], [], false, 0, 0))) 
-    else 
-      if v=ok then (replace (Attrs.get_id tree) ok nk (Lf (next, pls, r, bf, id)) 1) 
-        (* TODO : get rid of unnecessary write by changing i to two-bit int and distinguishing this case *)
-      else if next=[] then raise (NotFound "at least one key to swap not found")
-      else swap_i t block_size (Lf (next, pls, r, bf, id)) ok nk i >>= (function
-      | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl (Lf ([], [], false, 0, 0))))
-  | Il (v::next, pl::pls, c1::c2::cn, r, bf, id) ->
-    if i then
-      if nk<ok then
-        if next=[] then swap_i t block_size c2 ok nk i >>= function
-          | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::tr::cn, r, bf, id))
-        else swap_i t block_size (Il (next, pls, (c2::cn), r, bf, id)) ok nk i >>= function
-        | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl c1)
-      else swap_i t block_size c1 ok nk i >>= function
-      | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, tr::c2::cn, r, bf, id))
-    else if ok=v then replace (Attrs.get_id tree) ok nk tree 2
-    else if ok>v then 
-      if next=[] then swap_i t block_size c2 ok nk i >>= function
-        | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, c1::tr::cn, r, bf, id))
-      else swap_i t block_size (Il (next, pls, (c2::cn), r, bf, id)) ok nk i >>= function
-      | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl c1)
-    else swap_i t block_size c1 ok nk i >>= (function
-    | Error _ -> Lwt.return @@ Error `Not_found
-    | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, tr::c2::cn, r, bf, id)))
-  | _ -> raise (NotFound "at least one key to swap not found")
+          if leaf then swap_next next (if found=0 then 1 else found)
+          else if nk>ok then 
+            if next=[] then swap_child next 2
+            else swap_next next (if found=0 then 1 else found)
+          else swap_child [v] 2
+    else if v>ok then
+      if next=[] then swap_child next 0
+      else swap_next next 0
+    else swap_child [v] 0
 
   let steal t block_size tree morec = match tree with
   | Il (_, _, ca::cb::_, r, bf, _) -> 
-    merge t block_size tree ca cb true r 0 >>= (function
+    merge t block_size tree (Attrs.get_hd tree) ca cb true r >>= (function
     | Error _ -> Lwt.return @@ Error `Not_found
     | Ok (mt, _, hpointer, cblockpointer) -> 
       let mc = (match mt with
@@ -741,93 +681,65 @@ module Make(Sectors: Mirage_block.S) = struct
       else split t block_size hpointer cblockpointer mc mt lim)
   | _ -> raise (MalformedTree "must be an internal node with the two specified child nodes")
 
-  let rec delete t block_size tree k i = match tree with
-  | Il (v::next, pl::pls, ca::cb::cn, r, bf, id) -> 
-    let l1, l2 = Attrs.(n_keys ca, n_keys cb) in
-    if k=v then
-      if not (l1 < bf) then let nk = find_predecessor tree v false in (* check left subtree *)
-      swap_i t block_size tree v nk false >>= (function
+  let rec delete t block_size tree k = 
+    let merge_and_delete v ca cb =
+      merge t block_size tree v ca cb false false >>= function
       | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (newt) -> (match newt with
-          | Il (k1s, p1s, c1::cn1, r1, bf1, id) -> delete t block_size c1 k 0 >>= (function
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> Lwt.return @@ Ok (Il (k1s, p1s, tr::cn1, r1, bf1, id)))
-          | _ -> raise (MalformedTree "swap failed")))
-      else if not (l2 < bf) then let nk = find_successor tree v false in (* check right subtree *)
-      swap_i t block_size tree v nk false >>= (function 
-        | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (newt) -> (match newt with
-          | Il (k1s, p1s, c1::c2::cn1, r1, bf1, id) -> delete t block_size c2 k 0 >>= (function
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> Lwt.return @@ Ok (Il (k1s, p1s, c1::tr::cn1, r1, bf1, id)))
-          | _ -> raise (MalformedTree "swap failed")))
-      else merge t block_size tree ca cb false false i >>= (function 
-        | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (mt, change, _, _) -> (match mt with (* merge around key to delete and recursively delete it *)
-          | Il (_::_, _::_, _::_, true, _, _) -> delete t block_size mt k (if change then 0 else i)
-          | Il (k1::k1s, p1::p1s, c1::cn1, r1, bf1, id) -> delete t block_size c1 k 0 >>= (function 
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> Lwt.return @@ Ok (Il (k1::k1s, p1::p1s, tr::cn1, r1, bf1, id)))
-          | Il ([], [], c1::[], r1, bf1, id) -> delete t block_size c1 k 0 >>= (function 
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> Lwt.return @@ Ok (Il ([], [], tr::[], r1, bf1, id)))
-          | Lf (_::_, _::_, true, _, _) -> delete t block_size mt k 0
-          | _ -> raise (MalformedTree "merge failed")))
-    else let leftc, rightc = k<v, next=[] in
-      if leftc then
-        if l1 < bf then
-          if (l2 >= bf) then steal t block_size tree cb >>= (function (* steal from right sibling *)
-            | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (tr) -> delete t block_size tr k i)
-        else merge t block_size tree ca cb false false i >>= (function 
+      | Ok (mt, _, _, _) -> (match mt with
+        | Il (_::_, _::_, _::_, true, _, _) -> delete t block_size mt k (* a merge involving the root node could reduce tree height so we need to restart *)
+        | Il (v::next, pl::pls, c::cn, r, bf, id) -> delete t block_size c k >>= (function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (mt, change, _, _) -> (match mt with (* merge around key to delete and recursively delete it *)
-            | Il (_::_, _::_, _::_, _, _, _) -> delete t block_size mt k (if change then 0 else i)
-            | Il ([], [], c1::[], r1, bf1, id) -> delete t block_size c1 k 0 >>= (function 
-              | Error _ -> Lwt.return @@ Error `Not_found
-              | Ok (tr) -> Lwt.return @@ Ok (Il ([], [], tr::[], r1, bf1, id)))
-            | Lf (_::_, _::_, true, _, _) -> delete t block_size mt k 0
-            | _ -> raise (MalformedTree "merge failed"))) 
-          else delete t block_size ca k 0 >>= (function (* check left subtree *)
+          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, tr::cn, r, bf, id)))
+        | Il ([], [], c::[], r, bf, id) -> delete t block_size c k >>= (function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, tr::cb::cn, r, bf, id)))
-      else if rightc then
-        if l2 < bf then
-          if (l1 >= bf) then steal t block_size tree ca >>= function
-            | Error _ -> Lwt.return @@ Error `No_space
-            | Ok (tr) -> delete t block_size tr k i (* steal from left sibling *)
-          else merge t block_size tree ca cb false false i >>= (function 
+          | Ok (tr) -> Lwt.return @@ Ok (Il ([], [], tr::[], r, bf, id)))
+        | Lf (_::_, _::_, true, _, _) -> delete t block_size mt k
+        | _ -> raise (MalformedTree "merge failed")) in
+    match tree with
+    | Il (v::next, pl::pls, ca::cb::cn, r, bf, id) -> 
+      let l1, l2 = Attrs.(n_keys ca, n_keys cb) in
+      if k=v then
+        let lempty, rempty = l1<bf, l2<bf in
+        if not (lempty && rempty) then
+          let func = (if lempty then find_successor tree v else find_predecessor tree v) in
+          let nk = func false in (* check left subtree *)
+          swap_i t block_size tree v nk v 0 0 >>= (function
             | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (mt, change, _, _) -> (match mt with (* merge around key to delete and recursively delete it *)
-              | Il (_::_, _::_, _::_, _, _, _) -> delete t block_size mt k (if change then 0 else i)
-              | Il ([], [], c1::[], r1, bf1, id) -> delete t block_size c1 k 0 >>= (function 
+            | Ok (newt) -> (match newt with
+              | Il (k1s, p1s, c1::c2::cn, r1, bf1, id) -> let c = if lempty then c2 else c1 in delete t block_size c k >>= (function
                 | Error _ -> Lwt.return @@ Error `Not_found
-                | Ok (tr) -> Lwt.return @@ Ok (Il ([], [], tr::[], r1, bf1, id)))
-              | Lf (_::_, _::_, true, _, _) -> delete t block_size mt k 0
-              | _ -> raise (MalformedTree "merge failed")))
-        else delete t block_size cb k 0 >>= (function (* check left subtree *)
+                | Ok (tr) -> let newcn = if lempty then c1::tr::cn else tr::c2::cn in Lwt.return @@ Ok (Il (k1s, p1s, newcn, r1, bf1, id)))
+            | _ -> raise (MalformedTree "swap failed")))
+        else merge_and_delete v ca cb
+      else let leftc, rightc, lempty, rempty = k<v, next=[], l1<bf, l2<bf in
+        let ci = if lempty then cb else ca in
+        if (leftc && lempty && not rempty || rightc && rempty && not lempty) then steal t block_size tree ci >>= function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, ca::tr::cn, r, bf, id))) (* check right subtree *)
-        else delete t block_size (Il (next, pls, (cb::cn), r, bf, id)) k (i+1) >>= (function (* check next key in node *)
+          | Ok (tr) -> delete t block_size tr k
+        else if (leftc && lempty || rightc && rempty) then merge_and_delete v ca cb
+        else if (leftc || rightc) then delete t block_size ci k >>= function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl ca))
-  | Lf (v::next, pl::pls, r, bf, id) ->
-    if k=v then (
-      let hpointer, _cblockpointer = Ids.get_node_pointers_from_id id in
-      Block_ops.remove_key_from_head_block t block_size (Int64.of_int32 hpointer) k >>= (function
+          | Ok (tr) -> Lwt.return @@ Ok (Il (v::next, pl::pls, (if leftc then (tr::cb::cn) else (ca::tr::cn)), r, bf, id))
+        else delete t block_size (Il (next, pls, (cb::cn), r, bf, id)) k >>= (function (* check next key in node *)
+          | Error _ -> Lwt.return @@ Error `Not_found
+          | Ok (tr) -> Lwt.return @@ Ok (Tree_ops.restore tr v pl ca))
+    | Lf (v::next, pl::pls, r, bf, id) ->
+      if k=v then (
+        let hpointer, _cblockpointer = Ids.get_node_pointers_from_id id in
+        Block_ops.remove_key_from_head_block t block_size (Int64.of_int32 hpointer) k >>= (function
+          | Error _ -> Lwt.return @@ Error `Not_found
+          | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
+            | Error _ -> Lwt.return @@ Error `Not_found
+            | Ok () -> Lwt.return @@ Ok ((Lf (next, pls, r, bf, id))))))
+      else if (k>v && next!=[]) then delete t block_size (Lf (next, pls, r, bf, id)) k >>= (function
         | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
-          | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok () -> Lwt.return @@ Ok ((Lf (next, pls, r, bf, id))))))
-    else if (k>v && next!=[]) then delete t block_size (Lf (next, pls, r, bf, id)) k (i+1) >>= (function
-      | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (tr) -> Lwt.return @@ Ok (restore tr v pl (Lf ([], [], false, 0, 0))))
-    else raise (NotFound "key to delete not found")
-  | _ -> raise (MalformedTree ("not an internal node with >1 child"))
+        | Ok (tr) -> Lwt.return @@ Ok (Tree_ops.restore tr v pl (Lf ([], [], false, 0, 0))))
+      else raise (NotFound "key to delete not found")
+    | _ -> raise (MalformedTree ("not an internal node with >1 child"))
 
   let rec delete_list t block_size tree keys = match keys with
   | k::ks -> 
-    delete t block_size tree k 0 >>= (function
+    delete t block_size tree k >>= (function
       | Error _ -> Lwt.return @@ Error `Not_found
       | Ok (tr) -> delete_list t block_size tr ks >>= (function
         | Error _ -> Lwt.return @@ Error `Not_found
