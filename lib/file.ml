@@ -47,14 +47,11 @@ let n_pointers = function
       Float.to_int log2
     else 1
 
-let of_block index cs =
+let of_block cs =
   let sizeof_pointer = 4 in
-  let pointer_count = n_pointers index in
-  let pointers = List.init pointer_count (fun n ->
-      Cstruct.LE.get_uint32 cs (sizeof_pointer * n)
-    ) in
-  let sizeof_data = (Cstruct.length cs) - (sizeof_pointer * pointer_count) in
-  (pointers, Cstruct.sub cs (pointer_count * sizeof_pointer) sizeof_data)
+  let pointer = Cstruct.LE.get_uint32 cs 0 in
+  let sizeof_data = (Cstruct.length cs) - sizeof_pointer in
+  (pointer, Cstruct.sub cs sizeof_pointer sizeof_data)
 
 let last_block_index ~file_size ~block_size =
   let rec aux block_index bytes_to_write =
@@ -64,8 +61,7 @@ let last_block_index ~file_size ~block_size =
   in
   aux 0 file_size
 
-let rec first_byte_on_index ~block_size index =
-  if index = 0 then 0
-  else
-     (block_size - ((n_pointers (index - 1))  * 4)) +
-    (first_byte_on_index ~block_size (index - 1))
+let rec first_byte_on_index ~block_size index last_index =
+  let b_size = block_size - sizeof_pointer in
+  if index = last_index then 0
+  else b_size + (first_byte_on_index ~block_size (index + 1) last_index)

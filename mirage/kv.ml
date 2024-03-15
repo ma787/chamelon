@@ -6,6 +6,7 @@ let root_pair = (0L, 1L)
 
 module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   module Fs = Fs.Make(Sectors)(Clock)
+  module Block_types = Block_type.Make(Sectors)
 
   type key = Mirage_kv.Key.t
 
@@ -35,7 +36,7 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     | `Too_many_retries n -> Format.fprintf fmt "tried to write %d times and didn't succeed" n
     | #error as e -> pp_error fmt e
 
-  type t = Fs.t
+  type t = Block_types.t
 
   let get = Fs.File_read.get
 
@@ -47,8 +48,8 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
    * to set the data appropriately there. *)
   let set t key data : (unit, write_error) result Lwt.t =
     let name_length = String.length @@ Mirage_kv.Key.basename key in
-    if name_length > (Int32.to_int t.Fs.name_length_max) then begin
-      Log.err (fun f -> f "key length %d exceeds max length %ld - refusing to write" name_length t.Fs.name_length_max);
+    if name_length > (Int32.to_int t.Block_types.name_length_max) then begin
+      Log.err (fun f -> f "key length %d exceeds max length %ld - refusing to write" name_length t.Block_types.name_length_max);
       Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
     end else begin
       let dir = Mirage_kv.Key.parent key in
