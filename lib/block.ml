@@ -113,7 +113,7 @@
          write_hardtail ~after:List.(hd @@ rev commits) ~starting_xor_tag ~starting_offset block hardtail_region
        in
        if (after_last_crc + hardtail_bytes) > Cstruct.length cs then `Unwriteable
-       else if (after_last_crc + hardtail_bytes) > ((Cstruct.length cs) / 2) then `Split
+       else if (after_last_crc + hardtail_bytes) > ((3 * (Cstruct.length cs)) / 4) then `Split
        else `Ok
      with
      | Invalid_argument _ -> `Unwriteable

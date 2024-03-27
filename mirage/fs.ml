@@ -603,11 +603,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         | _, Some (_, ctz) ->
           match Chamelon.File.ctz_of_cstruct ctz with
           | Some (pointer, length) -> Ok (`Ctz (pointer, Int64.to_int length))
-          | None -> 
-            let p = Cstruct.LE.get_uint32 ctz 0 in
-            let l = Cstruct.LE.get_uint32 ctz 4 in
-            Format.eprintf "pointer: %ld, length: %ld" p l;
-            Error (`Value_expected filename)
+          | None -> Error (`Value_expected filename)
 
     let get t key : (string, error) result Lwt.t =
       let map_result = function
