@@ -48,7 +48,6 @@ let n_pointers = function
     else 1
 
 let of_block cs =
-  let sizeof_pointer = 4 in
   let pointer = Cstruct.LE.get_uint32 cs 0 in
   let sizeof_data = (Cstruct.length cs) - sizeof_pointer in
   (pointer, Cstruct.sub cs sizeof_pointer sizeof_data)

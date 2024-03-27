@@ -154,6 +154,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         let open Lwt_result.Infix in
         populate_lookahead ~except:l t tree >>= function
         | _, [] -> 
+          Log.err (fun f -> f "number of b-tree file and head/child block pointers: %d" (List.length (Traverse.all_btree_pointers tree)));
           Log.err (fun f -> f "no blocks remain free on filesystem");
           Lwt.return @@ Error `No_space
         | off, new_l -> 
@@ -556,14 +557,15 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
   end = struct
     let get_btree_file t key (pointer, file_size) =
-      let rec read_file pointer acc =
+      let rec read_file pointer acc read =
         Fs_Btree.Serial.read_data_block t pointer >>= (function
           | Error _ as e -> Lwt.return e
           | Ok cs ->
             let p, data_region = Chamelon.File.of_block cs in
-            if Int32.(equal p max_int) then Lwt.return @@ Ok (data_region::acc)
-            else read_file (Int64.of_int32 p) (data_region::acc)) in
-      read_file pointer [] >>= (function
+            let n_read = read + Cstruct.length data_region in
+            if n_read >= file_size then Lwt.return @@ Ok (data_region::acc)
+            else read_file (Int64.of_int32 p) (data_region::acc) n_read) in
+      read_file pointer [] 0 >>= (function
         | Error _ -> Lwt.return @@ Error (`Not_found key)
         | Ok (data) ->
           let cs = Cstruct.sub (Cstruct.concat data) 0 file_size in

@@ -215,11 +215,10 @@ let test_digest_deep_dictionary block _ () =
 let test_no_space block _ () =
   let blorp = String.init block_size (fun _ -> 'a') in
   let k n = Mirage_kv.Key.v @@ string_of_int n in
-  let blocks = 4096 * 10 / block_size in
-  let blocks_for_metadata = 18 in
+  let n_items = 34 in
   format_and_mount block >>= fun fs ->
-  let l = List.init (blocks - blocks_for_metadata) (fun n -> n) in
-  Logs.debug (fun f -> f "writing %d blocks of nonsense..." (blocks - blocks_for_metadata));
+  let l = List.init n_items (fun n -> n) in
+  Logs.debug (fun f -> f "writing %d blocks of nonsense..." n_items);
   Lwt_list.iter_s (fun i ->
     Chamelon.set fs (k i) blorp >>= function | Error e -> fail_write e | Ok () ->
       Logs.debug (fun f -> f "wrote a block's worth of 'a' to the key /%d" i);
@@ -227,8 +226,8 @@ let test_no_space block _ () =
   ) l >>= fun () ->
   Chamelon.list fs (Mirage_kv.Key.empty) >>= function | Error e -> fail_read e | Ok l ->
   Logs.debug (fun f -> f "%d items in the list for /" (List.length l));
-  Alcotest.(check int) "all set items are present" (blocks - blocks_for_metadata) @@ List.length l;
-  Chamelon.set fs (k (blocks - blocks_for_metadata + 1)) blorp >>= function
+  Alcotest.(check int) "all set items are present" n_items @@ List.length l;
+  Chamelon.set fs (k (n_items + 1)) blorp >>= function
   | Error `No_space -> Lwt.return_unit
   | Ok _ -> Alcotest.fail "setting last key succeeded when we expected No_space"
   | Error e -> Alcotest.failf "setting last key failed with %a instead of No_space" Chamelon.pp_write_error e
