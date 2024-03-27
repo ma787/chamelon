@@ -71,7 +71,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     let build_btree t pointer bf =
       Fs_Btree.Serial.of_cstruct t bf pointer
     
-    let all_btree_pointers tree = List.map Int64.of_int32 ((Fs_Btree.Attrs.get_all_keys tree) @ (Fs_Btree.Ids.get_all_pointers []))
+    let all_btree_pointers tree = (Fs_Btree.Attrs.get_all_keys tree) @ (Fs_Btree.Ids.get_all_pointers [])
 
     let rec follow_links t visited = function
       | Chamelon.Entry.Data _ -> Lwt.return @@ Ok ([])
@@ -93,7 +93,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             let links = Chamelon.Block.linked_blocks block in
             let string_of_link_list l = List.fold_left (fun acc lk -> match lk with
             | Chamelon.Entry.Metadata (a, b) -> acc ^ "metadata: (" ^ (Int64.to_string a) ^ ", " ^ (Int64.to_string b) ^ "), "
-            | Chamelon.Entry.Data (a, b) -> acc ^ "data: (" ^ (Int32.to_string a) ^ ", " ^ (Int32.to_string b) ^ "), ") "" l in
+            | Chamelon.Entry.Data (a, b) -> acc ^ "data: (" ^ (Int64.to_string a) ^ ", " ^ (Int64.to_string b) ^ "), ") "" l in
             Log.debug (fun f -> f "found %d linked blocks: %s" (List.length links) (string_of_link_list links));
             Lwt_list.fold_left_s (fun so_far link ->
                 match so_far with
@@ -201,9 +201,9 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   module Fs_data : sig
     val btree : Btree.node ref
     val update_btree : Btree.node -> unit
-    val get_file_table : int32 -> int32 list
-    val add_file : int32 -> int32 list -> unit
-    val remove_file : t -> int32 -> (unit, [> `Not_found]) result Lwt.t
+    val get_file_table : int64 -> int64 list
+    val add_file : int64 -> int64 list -> unit
+    val remove_file : t -> int64 -> (unit, [> `Not_found]) result Lwt.t
   end = struct
     let btree = ref (Btree.Lf ([], [], false, 0, -1))
     let fat = ref []
@@ -223,8 +223,8 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       Fs_Btree.delete_list t !btree plist [] >>= (function
       | Error _ -> Lwt.return @@ Error `Not_found
       | Ok (newt, pointers) ->
-        let newl = List.filter (fun (f, _) -> not (Int32.equal f pointer)) !fat in
-        btree := newt; fat := newl; Allocate.add_to_lookahead t (List.map Int64.of_int32 pointers);
+        let newl = List.filter (fun (f, _) -> not (Int64.equal f pointer)) !fat in
+        btree := newt; fat := newl; Allocate.add_to_lookahead t pointers;
         Lwt.return @@ Ok ())
       with Not_found -> Lwt.return @@ Error `Not_found
     end
@@ -564,7 +564,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             let p, data_region = Chamelon.File.of_block cs in
             let n_read = read + Cstruct.length data_region in
             if n_read >= file_size then Lwt.return @@ Ok (data_region::acc)
-            else read_file (Int64.of_int32 p) (data_region::acc) n_read) in
+            else read_file p (data_region::acc) n_read) in
       read_file pointer [] 0 >>= (function
         | Error _ -> Lwt.return @@ Error (`Not_found key)
         | Ok (data) ->
@@ -602,8 +602,12 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         end
         | _, Some (_, ctz) ->
           match Chamelon.File.ctz_of_cstruct ctz with
-          | Some (pointer, length) -> Ok (`Ctz (Int64.of_int32 pointer, Int32.to_int length))
-          | None -> Error (`Value_expected filename)
+          | Some (pointer, length) -> Ok (`Ctz (pointer, Int64.to_int length))
+          | None -> 
+            let p = Cstruct.LE.get_uint32 ctz 0 in
+            let l = Cstruct.LE.get_uint32 ctz 4 in
+            Format.eprintf "pointer: %ld, length: %ld" p l;
+            Error (`Value_expected filename)
 
     let get t key : (string, error) result Lwt.t =
       let map_result = function
@@ -635,13 +639,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             let _, data_region = Chamelon.File.of_block cs in
             if index = starti then Lwt.return @@ Ok (data_region::acc)
             else read_file pointers (index+1) starti (data_region::acc)) in
-      let table = let p = Int64.to_int32 pointer in p::(Fs_data.get_file_table p) in
+      let table = pointer::(Fs_data.get_file_table pointer) in
       let tlen = List.length table in
       let last_index = tlen - 1 in
       assert (Int.equal 0 (get_index file_size last_index));
       assert (Int.equal last_index (get_index 0 last_index));
       let start_index, end_index = get_index offset last_index, get_index (offset+length) last_index in
-      read_file (List.map Int64.of_int32 table) end_index start_index [] >>= (function
+      read_file table end_index start_index [] >>= (function
         | Error _ -> Lwt.return @@ Error (`Not_found key)
         | Ok [] -> Lwt.return @@ Ok ""
         | Ok (hd::blocks) ->
@@ -707,7 +711,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
           Ok tag.Chamelon.Tag.length
         | _, Some (_tag, data) ->
           match Chamelon.File.ctz_of_cstruct data with
-          | Some (_pointer, length) -> Ok (Int32.to_int length)
+          | Some (_pointer, length) -> Ok (Int64.to_int length)
           | None -> Error (`Value_expected (Mirage_kv.Key.v filename))
 
     let rec size_all t blockpair =
@@ -755,11 +759,11 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       if Int.compare so_far (String.length data) >= 0 then begin
         Lwt.return @@ Ok (tree, written)
       end else
-          let pointer = Int64.to_int32 (List.hd file_pointers) in
+          let pointer = List.hd file_pointers in
           let b_size = t.block_size - Fs_Btree.sizeof_pointer in
           let to_write = min b_size (String.length data - so_far) in
           let pl = String.sub data so_far to_write in
-          let next = try List.hd written with Failure _ -> Int32.max_int in
+          let next = try List.hd written with Failure _ -> Int64.max_int in
           Fs_Btree.insert_and_write t tree pointer pl next >>= (function
           | Error _ -> 
             Log.err (fun f -> f "get_blocks gave us too few blocks for our file");
@@ -798,7 +802,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             let name = Chamelon.File.name filename next in
             let ctime = Chamelon.Entry.ctime next (Clock.now_d_ps ()) in
             let ctz = Chamelon.File.create_ctz next
-                ~pointer:last_pointer ~file_size:(Int32.of_int file_size)
+                ~pointer:last_pointer ~file_size:(Int64.of_int file_size)
             in
             let new_entries = entries @ [name; ctime; ctz] in
             Log.debug (fun m -> m "writing %d entries for ctz for file %s of size %d" (List.length new_entries) filename file_size);
@@ -875,7 +879,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       File_read.get_value t dir filename >>= function
       | Ok (`Inline _) -> Lwt.return @@ Ok ()
       | Ok (`Ctz ctz) -> (match ctz with
-        | pointer, _file_size -> Fs_data.remove_file t (Int64.to_int32 pointer))
+        | pointer, _file_size -> Fs_data.remove_file t pointer)
       | Error (`Not_found _) -> Lwt.return @@ Ok ()
       | Error (`Value_expected _) -> Lwt.return @@ Ok ()
 

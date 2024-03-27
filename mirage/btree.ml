@@ -1,4 +1,4 @@
-type keys = int32 list
+type keys = int64 list
 type pl = string
 type node = Lf of keys * pl list * bool * int * int | Il of keys * pl list * node list * bool * int * int
 
@@ -14,7 +14,7 @@ module Make(Sectors: Mirage_block.S) = struct
   module Block_types = Block_type.Make(Sectors)
 
   open Block_types
-  let sizeof_pointer = 4
+  let sizeof_pointer = 8
 
   type error = [
     | `Not_found
@@ -27,10 +27,10 @@ module Make(Sectors: Mirage_block.S) = struct
     let rec to_string tree = let ks, ps, cs, root, bfval, pointer = match tree with
     | Il (k, p, c, r, bf, pi) -> k, p, c, r, bf, pi
     | Lf (k, p, r, bf, pi) -> k, p, [], r, bf, pi in
-    let string_of_int32_list l = "[" ^ (List.fold_left (fun acc x ->  acc ^ "0x" ^ Int32.to_string x ^ ",") "" l) ^ "]" in
+    let string_of_int64_list l = "[" ^ (List.fold_left (fun acc x ->  acc ^ "0x" ^ Int64.to_string x ^ ",") "" l) ^ "]" in
     let string_of_str_list l = "[" ^ (List.fold_left (fun acc x -> acc ^ x ^ ",") "" l) ^ "]" in
     let string_of_tree_list l = "[" ^ (List.fold_left (fun acc x -> acc ^ (to_string x) ^ ",") "" l) ^ "]" in
-    "(Id: " ^ (string_of_int pointer) ^ ", " ^ (string_of_int32_list ks) ^ ", " ^ (string_of_str_list ps) ^ ", " ^ 
+    "(Id: " ^ (string_of_int pointer) ^ ", " ^ (string_of_int64_list ks) ^ ", " ^ (string_of_str_list ps) ^ ", " ^ 
     (if List.length cs > 0 then ((string_of_tree_list cs) ^ ", ") else "") ^ (string_of_bool root) ^ ", " ^ (string_of_int bfval) ^ ")"
 
     let n_keys tree = match tree with
@@ -41,7 +41,7 @@ module Make(Sectors: Mirage_block.S) = struct
     | Il (ks, _, _, _, _, _) -> List.hd ks
     | Lf (ks, _, _, _, _) -> List.hd ks 
 
-    let equal t1 t2 = Int32.equal (get_hd t1) (get_hd t2)
+    let equal t1 t2 = Int64.equal (get_hd t1) (get_hd t2)
 
     let is_leaf tree = match tree with
     | Il _ -> false
@@ -87,7 +87,7 @@ module Make(Sectors: Mirage_block.S) = struct
       let rec get_key_list tree = match tree with
       | Il (ks, _, cn, _, _, _) -> ks @ (List.flatten (List.map get_key_list cn))
       | Lf (ks, _, _, _, _) -> ks in
-      List.sort_uniq Int32.compare (get_key_list tree)
+      List.sort_uniq Int64.compare (get_key_list tree)
     
     let rec get_left l i m = match l with
     | c::cs -> if i=m then [] else c::(get_left cs (i+1) m)
@@ -158,7 +158,7 @@ module Make(Sectors: Mirage_block.S) = struct
     | _ -> raise (MalformedTree "cannot insert key in internal node")
     
     let remove_key tree k = match tree with
-    | Lf (ks, pls, r, t, id) -> Lf ((List.filter (fun i -> not (Int32.equal k i)) ks), List.tl pls, r, t, id)
+    | Lf (ks, pls, r, t, id) -> Lf ((List.filter (fun i -> not (Int64.equal k i)) ks), List.tl pls, r, t, id)
     | _ -> raise (MalformedTree "cannot remove key from internal node")
   
     let rec replace_and_remove tree kl newc =
@@ -191,7 +191,7 @@ module Make(Sectors: Mirage_block.S) = struct
     let get_all_pointers l =
       let rec list_from_pair_list plist acc = match plist with
       | (hp, cbp)::prs -> 
-        if Int32.(equal cbp max_int) then list_from_pair_list prs (hp::acc)
+        if Int64.(equal cbp max_int) then list_from_pair_list prs (hp::acc)
         else list_from_pair_list prs (hp::cbp::acc) 
       | [] -> acc in
       let _ids, pointer_pairs = List.split !ids in
@@ -211,12 +211,12 @@ module Make(Sectors: Mirage_block.S) = struct
     
     let rec read_pointers cs acc n lim =
       if n<lim then acc
-      else let p = Cstruct.LE.get_uint32 cs (n*sizeof_pointer) in
+      else let p = Cstruct.LE.get_uint64 cs (n*sizeof_pointer) in
       read_pointers cs (p::acc) (n-1) lim
     
     let write_data_block_from_pl t pointer next pl =
       let cs = Cstruct.create t.block_size in
-      Cstruct.LE.set_uint32 cs 0 next;
+      Cstruct.LE.set_uint64 cs 0 next;
       Cstruct.blit_from_string pl 0 cs sizeof_pointer (String.length pl);
       write_block t pointer cs
     
@@ -230,7 +230,7 @@ module Make(Sectors: Mirage_block.S) = struct
     let write_child_block t cblockpointer cpointers =
       let cs = Cstruct.create t.block_size in
       for n=0 to (List.length cpointers - 1) do
-        Cstruct.LE.set_uint32 cs (n*sizeof_pointer) (List.nth cpointers n);
+        Cstruct.LE.set_uint64 cs (n*sizeof_pointer) (List.nth cpointers n);
       done;
       write_block t cblockpointer cs
     
@@ -244,18 +244,18 @@ module Make(Sectors: Mirage_block.S) = struct
     let write_head_block t tree hpointer cpointer =
       let nk = Attrs.n_keys tree in
       let cs = Cstruct.create t.block_size in
-      Cstruct.LE.set_uint32 cs 0 (Int32.of_int (Attrs.get_id tree)); (* id of this node *)
-      Cstruct.LE.set_uint32 cs sizeof_pointer cpointer; (* pointer to block containing child node pointers *)
-      Cstruct.LE.set_uint32 cs (2*sizeof_pointer) (Int32.of_int nk); (* number of keys in this node*)
+      Cstruct.LE.set_uint64 cs 0 (Int64.of_int (Attrs.get_id tree)); (* id of this node *)
+      Cstruct.LE.set_uint64 cs sizeof_pointer cpointer; (* pointer to block containing child node pointers *)
+      Cstruct.LE.set_uint64 cs (2*sizeof_pointer) (Int64.of_int nk); (* number of keys in this node*)
       let keys = Attrs.get_keys tree in
       for n=0 to nk-1 do
-        Cstruct.LE.set_uint32 cs ((n+3)*sizeof_pointer) (List.nth keys n);
+        Cstruct.LE.set_uint64 cs ((n+3)*sizeof_pointer) (List.nth keys n);
       done;
       write_block t hpointer cs
 
     let rec of_cstruct t bf pointer =
       let rec get_cn cpointers acc = match cpointers with
-      | c::cl -> of_cstruct t bf (Int64.of_int32 c) >>= (function
+      | c::cl -> of_cstruct t bf c >>= (function
         | Error _ as e -> Lwt.return e
         | Ok (tr) -> get_cn cl (tr::acc))
       | [] -> Lwt.return @@ Ok (acc) in
@@ -263,20 +263,20 @@ module Make(Sectors: Mirage_block.S) = struct
       This_Block.read t.block pointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
-        let id = Int32.to_int (Cstruct.LE.get_uint32 hblock 0) in
-        if (pointer=2L && id != 1) then (Ids.ids := [(1, (2l, Int32.max_int))]; Lwt.return @@ Ok (Lf ([], [], true, bf, 1)))
-        else let cblockpointer = Cstruct.LE.get_uint32 hblock sizeof_pointer in
-        let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
-        let keys = List.sort Int32.compare (read_pointers hblock [] ((nk-1) + 3) 3) in
+        let id = Int64.to_int (Cstruct.LE.get_uint64 hblock 0) in
+        if (pointer=2L && id != 1) then (Ids.ids := [(1, (2L, Int64.max_int))]; Lwt.return @@ Ok (Lf ([], [], true, bf, 1)))
+        else let cblockpointer = Cstruct.LE.get_uint64 hblock sizeof_pointer in
+        let nk = Int64.to_int (Cstruct.LE.get_uint64 hblock (2*sizeof_pointer)) in
+        let keys = List.sort Int64.compare (read_pointers hblock [] ((nk-1) + 3) 3) in
         let pls = List.init nk (fun _ -> "") in (* do not read block data from disk *)
         let r = id = 1 in (* root node has id 1 *)
-        if Int32.equal cblockpointer Int32.max_int then Lwt.return @@ Ok (Lf (keys, pls, r, bf, id))
-        else read_child_block t (Int64.of_int32 cblockpointer) nk >>= (function
+        if Int64.(equal cblockpointer max_int) then Lwt.return @@ Ok (Lf (keys, pls, r, bf, id))
+        else read_child_block t cblockpointer nk >>= (function
         | Error _ as e -> Lwt.return e
         | Ok (cpointers) -> get_cn cpointers [] >>= (function
         | Error _ as e -> Lwt.return e
         | Ok (cn_list) -> 
-          let cn = List.sort (fun tr1 tr2 -> Int32.compare (Attrs.get_hd tr1) (Attrs.get_hd tr2)) cn_list in
+          let cn = List.sort (fun tr1 tr2 -> Int64.compare (Attrs.get_hd tr1) (Attrs.get_hd tr2)) cn_list in
           Lwt.return @@ Ok (Il (keys, pls, cn, r, bf, id))))
 
     let get_block_pointers n lookahead =
@@ -298,9 +298,9 @@ module Make(Sectors: Mirage_block.S) = struct
       This_Block.read t.block hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
-        let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
-        Cstruct.LE.set_uint32 hblock (2*sizeof_pointer) (Int32.of_int (nk+1));
-        Cstruct.LE.set_uint32 hblock ((nk+3)*sizeof_pointer) k;
+        let nk = Int64.to_int (Cstruct.LE.get_uint64 hblock (2*sizeof_pointer)) in
+        Cstruct.LE.set_uint64 hblock (2*sizeof_pointer) (Int64.of_int (nk+1));
+        Cstruct.LE.set_uint64 hblock ((nk+3)*sizeof_pointer) k;
         Lwt.return @@ Ok hblock
     
     let remove_key_from_head_block t hpointer k =
@@ -308,14 +308,14 @@ module Make(Sectors: Mirage_block.S) = struct
       This_Block.read t.block hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
-        let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
-        let keys = List.sort Int32.compare (Serial.read_pointers hblock [] (nk+2) 3) in
-        let newk = List.filter (fun i -> not (Int32.equal k i)) keys in
-        Cstruct.LE.set_uint32 hblock ((nk+2)*sizeof_pointer) Int32.zero;
+        let nk = Int64.to_int (Cstruct.LE.get_uint64 hblock (2*sizeof_pointer)) in
+        let keys = List.sort Int64.compare (Serial.read_pointers hblock [] (nk+2) 3) in
+        let newk = List.filter (fun i -> not (Int64.equal k i)) keys in
+        Cstruct.LE.set_uint64 hblock ((nk+2)*sizeof_pointer) Int64.max_int;
         for n=0 to (nk-2) do
-          Cstruct.LE.set_uint32 hblock ((n+3)*sizeof_pointer) (List.nth newk n);
+          Cstruct.LE.set_uint64 hblock ((n+3)*sizeof_pointer) (List.nth newk n);
         done;
-        Cstruct.LE.set_uint32 hblock (2*sizeof_pointer) (Int32.of_int (nk-1));
+        Cstruct.LE.set_uint64 hblock (2*sizeof_pointer) (Int64.of_int (nk-1));
         Lwt.return @@ Ok hblock
     
     let replace_key_in_head_block t hpointer ok newk =
@@ -323,21 +323,21 @@ module Make(Sectors: Mirage_block.S) = struct
       This_Block.read t.block hpointer [hblock] >>= function
       | Error _ as e -> Lwt.return e
       | Ok () -> 
-        let nk = Int32.to_int (Cstruct.LE.get_uint32 hblock (2*sizeof_pointer)) in
-        let keys = List.sort Int32.compare (Serial.read_pointers hblock [] (nk+2) 3) in
-        let newks = List.filter (fun i -> not (Int32.equal ok i)) keys in
-        Cstruct.LE.set_uint32 hblock ((nk+2)*sizeof_pointer) newk;
+        let nk = Int64.to_int (Cstruct.LE.get_uint64 hblock (2*sizeof_pointer)) in
+        let keys = List.sort Int64.compare (Serial.read_pointers hblock [] (nk+2) 3) in
+        let newks = List.filter (fun i -> not (Int64.equal ok i)) keys in
+        Cstruct.LE.set_uint64 hblock ((nk+2)*sizeof_pointer) newk;
         for n=0 to (nk-2) do
-          Cstruct.LE.set_uint32 hblock ((n+3)*sizeof_pointer) (List.nth newks n);
+          Cstruct.LE.set_uint64 hblock ((n+3)*sizeof_pointer) (List.nth newks n);
         done;
-        Cstruct.LE.set_uint32 hblock (2*sizeof_pointer) (Int32.of_int (nk-1));
+        Cstruct.LE.set_uint64 hblock (2*sizeof_pointer) (Int64.of_int (nk-1));
         Lwt.return @@ Ok hblock
     
     let add_cpointer_to_child_block t cblockpointer cpointer nk =
       let cblock = Cstruct.create t.block_size in
       This_Block.read t.block cblockpointer [cblock] >>= function
       | Error _ as e -> Lwt.return e
-      | Ok () -> Cstruct.LE.set_uint32 cblock ((nk+1)*sizeof_pointer) cpointer; Lwt.return @@ Ok (cblock)
+      | Ok () -> Cstruct.LE.set_uint64 cblock ((nk+1)*sizeof_pointer) cpointer; Lwt.return @@ Ok (cblock)
     
     let remove_cpointer_from_child_block t cblockpointer cpointer nk =
       let cblock = Cstruct.create t.block_size in
@@ -345,10 +345,10 @@ module Make(Sectors: Mirage_block.S) = struct
       | Error _ as e -> Lwt.return e
       | Ok () -> 
         let cpointers = Serial.read_pointers cblock [] nk 0 in
-        let newc = List.filter (fun i -> not (Int32.equal cpointer i)) cpointers in
-        Cstruct.LE.set_uint32 cblock (((List.length (cpointers))-1)*sizeof_pointer) Int32.zero;
+        let newc = List.filter (fun i -> not (Int64.equal cpointer i)) cpointers in
+        Cstruct.LE.set_uint64 cblock (((List.length (cpointers))-1)*sizeof_pointer) Int64.max_int;
         for n=0 to (List.length newc)-1 do
-          Cstruct.LE.set_uint32 cblock (n*sizeof_pointer) (List.nth newc n);
+          Cstruct.LE.set_uint64 cblock (n*sizeof_pointer) (List.nth newc n);
         done;
         Lwt.return @@ Ok cblock
     end
@@ -364,17 +364,17 @@ module Make(Sectors: Mirage_block.S) = struct
       let id = Attrs.get_id tree in
       let cn = Attrs.get_cn tree in
       let cpointers = get_cpointers cn in
-      Serial.write_head_block t tree (Int64.of_int32 hpointer) cblockpointer >>= function
+      Serial.write_head_block t tree hpointer cblockpointer >>= function
       | Error _ as e -> Lwt.return e
-      | Ok () -> Serial.write_child_block t (Int64.of_int32 cblockpointer) cpointers >>= function
+      | Ok () -> Serial.write_child_block t cblockpointer cpointers >>= function
         | Error _ as e -> Lwt.return e
         | Ok () -> Ids.store_id (id, (hpointer, cblockpointer)); Lwt.return (Ok ())
     
     let write_leaf_node t hpointer tree =
       let id = Attrs.get_id tree in
-      Serial.write_head_block t tree (Int64.of_int32 hpointer) Int32.max_int >>= function
+      Serial.write_head_block t tree hpointer Int64.max_int >>= function
       | Error _ as e -> Lwt.return e
-      | Ok () -> Ids.store_id (id, (hpointer, Int32.max_int)); Lwt.return (Ok ())
+      | Ok () -> Ids.store_id (id, (hpointer, Int64.max_int)); Lwt.return (Ok ())
     
     let get_node_split_update t hpointer cblockpointer nk k cpointer =
       Block_ops.add_cpointer_to_child_block t cblockpointer cpointer nk >>= function
@@ -391,9 +391,9 @@ module Make(Sectors: Mirage_block.S) = struct
         | Ok () -> Lwt.return @@ (Ok ())
 
     let node_split_update t hpointer cblockpointer nk k cpointer =
-      get_node_split_update t (Int64.of_int32 hpointer) (Int64.of_int32 cblockpointer) nk k cpointer >>= function
+      get_node_split_update t hpointer cblockpointer nk k cpointer >>= function
       | Error _ -> Lwt.return @@ Error `No_space
-      | Ok (hblock, cblock) -> write_node_split_update t (Int64.of_int32 hpointer) (Int64.of_int32 cblockpointer) hblock cblock >>= (function
+      | Ok (hblock, cblock) -> write_node_split_update t hpointer cblockpointer hblock cblock >>= (function
         | Ok () -> Lwt.return (Ok ())
         | Error _ -> Lwt.return @@ Error `No_space)
   end
@@ -484,14 +484,14 @@ module Make(Sectors: Mirage_block.S) = struct
   let rec insert t tree k v i =
     let id, bf, root, leaf = Attrs.(get_id tree, get_degree tree, is_root tree, is_leaf tree) in
     let lim = 2*bf-1 in
-    let empty, full = Int32.(equal v max_int), Attrs.n_keys tree = lim in
+    let empty, full = Int64.(equal v max_int), Attrs.n_keys tree = lim in
     if (full && root && not i) then let n = if leaf then 2 else 4 in Serial.get_block_pointers n t.lookahead >>= function
     | Error _ -> Lwt.return @@ Error `No_space
     | Ok pointers -> (match pointers with
-      | p1::p2::[] when leaf -> split t (List.map Int64.to_int32 [p1; p2]) [Int32.max_int; Int32.max_int] tree tree (bf-1) >>= (function
+      | p1::p2::[] when leaf -> split t  [p1; p2] [Int64.max_int; Int64.max_int] tree tree (bf-1) >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
         | Ok (tr) -> insert t tr k (Attrs.get_hd tr) false)
-      | p1::p2::p3::p4::[] when (not leaf) -> split t (List.map Int64.to_int32 [p1; p2]) (List.map Int64.to_int32 [p3; p4]) tree tree (bf-1) >>= (function
+      | p1::p2::p3::p4::[] when (not leaf) -> split t [p1; p2] [p3; p4] tree tree (bf-1) >>= (function
         | Error _ -> Lwt.return @@ Error `No_space
         | Ok (tr) -> insert t tr k (Attrs.get_hd tr) false)
       | _ -> Lwt.return @@ Error `No_space)
@@ -508,10 +508,10 @@ module Make(Sectors: Mirage_block.S) = struct
       if (Attrs.n_keys c = lim) then let n = if cleaf then 1 else 2 in Serial.get_block_pointers n t.lookahead >>= function
       | Error _ -> Lwt.return @@ Error `No_space
       | Ok pointers -> (match pointers with
-        | p1::[] when cleaf -> split t [Int64.to_int32 p1] [Int32.max_int] c tree (bf-1) >>= (function
+        | p1::[] when cleaf -> split t [p1] [Int64.max_int] c tree (bf-1) >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok (tr) -> insert t tr k (Attrs.get_hd tr) true)
-        | p1::p2::[] when (not cleaf) -> split t [Int64.to_int32 p1] [Int64.to_int32 p2] c tree (bf-1) >>= (function
+        | p1::p2::[] when (not cleaf) -> split t [p1] [p2] c tree (bf-1) >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok (tr) -> insert t tr k (Attrs.get_hd tr) true)
         | _ -> Lwt.return @@ Error `No_space)
@@ -521,18 +521,18 @@ module Make(Sectors: Mirage_block.S) = struct
 
   let insert_and_write t tree k pl next =
     let write_block t k next pl tr =
-      Serial.write_data_block_from_pl t (Int64.of_int32 k) next pl >>= function
+      Serial.write_data_block_from_pl t k next pl >>= function
       | Error _ -> Lwt.return @@ Error `No_space
       | Ok () -> Lwt.return @@ Ok tr in
-    let v = try Attrs.get_hd tree with Failure _ -> Int32.max_int in
+    let v = try Attrs.get_hd tree with Failure _ -> Int64.max_int in
     insert t tree k v false >>= function
     | Error _ -> Lwt.return @@ Error `No_space
     | Ok (tr, tr_id, update) ->
       if not update then
         let hpointer, _cpointer = Ids.get_node_pointers_from_id tr_id in
-        Block_ops.add_key_to_head_block t (Int64.of_int32 hpointer) k >>= (function
+        Block_ops.add_key_to_head_block t hpointer k >>= (function
         | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
+        | Ok (hblock) -> Serial.write_block t hpointer hblock >>= (function
           | Error _ -> Lwt.return @@ Error `No_space
           | Ok () -> write_block t k next pl tr))
       else write_block t k next pl tr
@@ -543,13 +543,13 @@ module Make(Sectors: Mirage_block.S) = struct
       let fhpointer, fcblockpointer = Ids.get_node_pointers_from_id cid in
       Ids.remove_id cid; (* node id id2 is now unused *)
       let _hpointer, cpointer = Ids.get_node_pointers_from_id cid in
-      Block_ops.remove_cpointer_from_child_block t (Int64.of_int32 cblockpointer) cpointer nk >>= function
+      Block_ops.remove_cpointer_from_child_block t cblockpointer cpointer nk >>= function
       | Error _ -> Lwt.return @@ Error `Not_found
-      | Ok (cblock) -> Block_ops.remove_key_from_head_block t (Int64.of_int32 hpointer) k >>= (function
+      | Ok (cblock) -> Block_ops.remove_key_from_head_block t hpointer k >>= (function
         | Error _ -> Lwt.return @@ Error `Not_found
-        | Ok (hblock) -> Serial.write_block t (Int64.of_int32 cblockpointer) cblock >>= (function
+        | Ok (hblock) -> Serial.write_block t cblockpointer cblock >>= (function
           | Error _ -> Lwt.return @@ Error `Not_found
-          | Ok () -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
+          | Ok () -> Serial.write_block t hpointer hblock >>= (function
             | Error _ -> Lwt.return @@ Error `Not_found
             | Ok () -> Lwt.return @@ Ok (tr, [fhpointer], [fcblockpointer])))) in
     let id, bf, root, leaf = Attrs.get_id parent, Attrs.get_degree parent, Attrs.is_root parent, Attrs.is_leaf parent in
@@ -693,7 +693,7 @@ module Make(Sectors: Mirage_block.S) = struct
       merge t tree v ca cb false false >>= function
       | Error _ -> Lwt.return @@ Error `Not_found
       | Ok (mt, hps, cbps) -> delete t (Attrs.get_hd mt) mt k (hps @ cbps @ pointers) in
-    if Int32.(equal v max_int) then Lwt.return @@ Ok (tree, pointers) (* cannot delete anything from an empty node *)
+    if Int64.(equal v max_int) then Lwt.return @@ Ok (tree, pointers) (* cannot delete anything from an empty node *)
     else let ks, pls, r, bf, id, leaf = Attrs.(get_keys tree, List.init (n_keys tree) (fun _ -> ""), is_root tree, get_degree tree, get_id tree, is_leaf tree) in
       let next = Tree_ops.get_next tree v in
       let ca, cb = if not leaf then Tree_ops.(get_child tree [v], get_child tree next) else (Lf ([], [], false, 0, -1)), (Lf ([], [], false, 0, -1)) in
@@ -701,9 +701,9 @@ module Make(Sectors: Mirage_block.S) = struct
       let leftc, rightc, lempty, rempty = k<v, next=[], l1<bf, l2<bf in
       if k=v then
         if leaf then let hpointer, _cblockpointer = Ids.get_node_pointers_from_id id in
-          Block_ops.remove_key_from_head_block t (Int64.of_int32 hpointer) k >>= (function
+          Block_ops.remove_key_from_head_block t hpointer k >>= (function
             | Error _ -> Lwt.return @@ Error `Not_found
-            | Ok (hblock) -> Serial.write_block t (Int64.of_int32 hpointer) hblock >>= (function
+            | Ok (hblock) -> Serial.write_block t hpointer hblock >>= (function
               | Error _ -> Lwt.return @@ Error `Not_found
               | Ok () -> Lwt.return @@ Ok (Tree_ops.remove_key tree k, pointers)))
         else if not (lempty && rempty) then
@@ -738,3 +738,4 @@ module Make(Sectors: Mirage_block.S) = struct
         | Ok (tr1, ps1) -> Lwt.return @@ Ok (tr1, ps1)))
   | [] -> Lwt.return @@ Ok (tree, pointers)
 end
+

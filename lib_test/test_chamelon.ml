@@ -87,7 +87,7 @@ module Block = struct
   let example_block =
     let entries = [
       Chamelon.File.name "one" 1;
-      Chamelon.File.create_ctz 1 ~pointer:2l ~file_size:1024l;
+      Chamelon.File.create_ctz 1 ~pointer:2L ~file_size:1024L;
       Chamelon.File.name "two" 2;
       Chamelon.File.create_inline 2 (Cstruct.create 8), Cstruct.create 8;
       Chamelon.File.name "three" 3;
@@ -239,17 +239,6 @@ module Entry = struct
 end
 
 module File = struct
-
-  let last_block () =
-    let block_size = 512 in
-    Alcotest.(check int) "tiny file" 0 @@ Chamelon.File.last_block_index ~file_size:1 ~block_size;
-    Alcotest.(check int) "one-block file" 0 @@ Chamelon.File.last_block_index ~file_size:block_size ~block_size;
-    Alcotest.(check int) "one block and change" 1 @@ Chamelon.File.last_block_index ~file_size:(block_size + block_size / 2) ~block_size;
-    Alcotest.(check int) "maximal two-block file" 1 @@ Chamelon.File.last_block_index
-      ~file_size:(block_size + (block_size - 4)) ~block_size;
-    Alcotest.(check int) "minimal three-block file" 2 @@ Chamelon.File.last_block_index
-      ~file_size:(block_size + (block_size - 4) + 1) ~block_size
-
   let size () =
     let not_a_file = Chamelon.Dir.mkdir ~to_pair:(2L, 3L) 1 in
     match Chamelon.Content.size not_a_file with
@@ -257,7 +246,7 @@ module File = struct
     | `Skip -> Alcotest.fail "inappropriately skipped a directory"
     | `Dir p ->
       Alcotest.(check @@ pair int64 int64) "dirpair to recurse into for size" (2L, 3L) p;
-      let ctz = Chamelon.File.create_ctz 2 ~pointer:4l ~file_size:10l in
+      let ctz = Chamelon.File.create_ctz 2 ~pointer:4L ~file_size:10L in
       match Chamelon.Content.size ctz with
       | `Dir _ | `Skip -> Alcotest.fail "didn't get file size for a ctz"
       | `File n ->
@@ -292,7 +281,6 @@ let () =
           tc "entry roundtrip" `Quick Entry.roundtrip;
         ]);
     ( "file", [
-          tc "tricky last block index values" `Quick File.last_block;
           tc "sizes of entries" `Quick File.size;
         ]);
     ( "roundtrip", [

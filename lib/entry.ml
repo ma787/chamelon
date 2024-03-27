@@ -1,6 +1,6 @@
 type t = Tag.t * Cstruct.t
 type link = | Metadata of (int64 * int64)
-            | Data of (int32 * int32)
+            | Data of (int64 * int64)
 
 let sizeof t =
   Cstruct.length (snd t) + Tag.size
