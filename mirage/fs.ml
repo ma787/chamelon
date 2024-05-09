@@ -69,10 +69,16 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
   module Traverse = struct   
     let build_btree t pointer b =
-      Fs_Btree.Serial.of_cstruct t b pointer
+      Fs_Btree.Serial.read_node t b pointer >>= function
+      | Error _ as e -> Lwt.return e
+      | Ok tree -> 
+        let ks, _, _, _ = Fs_Btree.Attrs.get_all tree in
+        if List.length ks>0 then Lwt.return @@ Ok tree
+        else Fs_Btree.Serial.write_empty_root t tree >>= function
+        | Error _ as e -> Lwt.return e
+        | Ok () -> Lwt.return @@ Ok tree
 
     let rec get_btree_pointers t l pointer =
-      Log.debug (fun f -> f "get_btree_pointers call, pointer = %Ld" pointer);
       match l with
       | Error _ as e -> Lwt.return e
       | Ok l ->
@@ -126,7 +132,9 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       follow_links t visited pair >>= function
       | Error _ as e -> Lwt.return e
       | Ok (used_blocks) -> 
-        Lwt.return @@ Ok ((Fs_Btree.Ids.get_all_node_pointers ()) @ used_blocks)
+        Fs_Btree.Serial.used_blocks t btree_root >>= function
+        | Error _ -> Lwt.return @@ Error `Disconnected
+        | Ok blocks -> Lwt.return @@ Ok (btree_root::(used_blocks @ blocks))
 
     (* [last_block t pair] returns the last blockpair in the hardtail
      * linked list starting at [pair], which may well be [pair] itself *)
@@ -164,7 +172,6 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       t.lookahead := {!(t.lookahead) with blocks=(used @ new_blocks)}
 
     let get_blocks t n: (int64 list, write_error) result Lwt.t =
-      Log.app (fun f -> f "get blocks call");
       let recover l =
         let open Lwt_result.Infix in
         populate_lookahead ~except:l t >>= function
@@ -219,7 +226,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     val add_file : int64 -> int64 list -> unit
     val remove_file : t -> int64 -> (unit, [> `Not_found]) result Lwt.t
   end = struct
-    let btree = ref (Btree.Lf ([], false, 0, -1))
+    let btree = ref (Btree.Lf ([], false, 0, -1L))
     let fat = ref []
 
     let update_btree tree = btree := tree
@@ -572,7 +579,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   end = struct
     let get_btree_file t key (pointer, file_size) =
       let rec read_file pointer acc read =
-        Fs_Btree.Serial.read_data_block t pointer >>= (function
+        Fs_Btree.Serial.read_block t pointer >>= (function
           | Error _ as e -> Lwt.return e
           | Ok cs ->
             let p, data_region = Chamelon.File.of_block cs in
@@ -643,7 +650,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       if byte <= b_size then i
       else get_index (byte-b_size) (i-1) in
       let rec read_file pointers index starti acc =
-        Fs_Btree.Serial.read_data_block t (List.nth pointers index) >>= (function
+        Fs_Btree.Serial.read_block t (List.nth pointers index) >>= (function
           | Error _ as e -> Lwt.return e
           | Ok cs ->
             let _, data_region = Chamelon.File.of_block cs in
