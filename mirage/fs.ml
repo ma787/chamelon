@@ -68,12 +68,11 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   end
 
   module Traverse = struct   
-    let build_btree t pointer b =
-      Fs_Btree.Serial.read_node t b pointer >>= function
+    let build_btree t b =
+      Fs_Btree.Serial.read_node t b btree_root >>= function
       | Error _ as e -> Lwt.return e
-      | Ok tree -> 
-        let ks, _, _, _ = Fs_Btree.Attrs.get_all tree in
-        if List.length ks>0 then Lwt.return @@ Ok tree
+      | Ok tree, valid -> 
+        if valid then Lwt.return @@ Ok tree
         else Fs_Btree.Serial.write_empty_root t tree >>= function
         | Error _ as e -> Lwt.return e
         | Ok () -> Lwt.return @@ Ok tree
@@ -128,8 +127,8 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             | Ok list -> Lwt.return @@ Ok (a :: b :: list)
             | e -> Lwt.return e
         
-    let follow_links_tree t visited pair =
-      follow_links t visited pair >>= function
+    let follow_links_tree t =
+      follow_links t [] (Chamelon.Entry.Metadata root_pair) >>= function
       | Error _ as e -> Lwt.return e
       | Ok (used_blocks) -> 
         Fs_Btree.Serial.used_blocks t btree_root >>= function
@@ -159,7 +158,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
       0, IntSet.(elements @@ diff pool (of_list used_blocks))
 
     let populate_lookahead ~except t =
-      Traverse.follow_links_tree t [] (Chamelon.Entry.Metadata root_pair) >|= function
+      Traverse.follow_links_tree t >|= function
       | Error e ->
         Log.err (fun f -> f "error attempting to find unused blocks: %a" This_Block.pp_error e);
         Error `No_space
@@ -999,13 +998,13 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         Log.debug (fun f -> f "mounting fs with file size max %ld, name length max %ld" file_size_max name_length_max);
         Lwt_mutex.lock t.new_block_mutex >>= fun () ->
         let b = (t.block_size + 1 - 3) / (2*Fs_Btree.sizeof_pointer) in
-        Traverse.build_btree t btree_root b >>= function
+        Traverse.build_btree t b >>= function
         | Error _e ->
           Lwt_mutex.unlock t.new_block_mutex;
           Log.err (fun f -> f "couldn't build b-tree");
           Lwt.return @@ Error (`Not_found Mirage_kv.Key.empty)
         | Ok btree ->
-          (Traverse.follow_links_tree t [] (Chamelon.Entry.Metadata root_pair) >>= function
+          (Traverse.follow_links_tree t >>= function
           | Error _e ->
             Lwt_mutex.unlock t.new_block_mutex;
             Log.err (fun f -> f "couldn't get list of used blocks");
