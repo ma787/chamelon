@@ -1,6 +1,6 @@
 image := "_build/default/src/test.img"
 HOME := env_var("HOME")
-DEVICE := "loop29"
+DEVICE := "loop67"
 MOUNTPOINT := "/mnt"
 
 block_size := "4096"
@@ -48,7 +48,7 @@ umount:
 mount: umount
 	sudo losetup /dev/{{DEVICE}} {{image}}
 	sudo chmod a+rw /dev/{{DEVICE}}
-	sudo {{HOME}}/Project/littlefs-fuse-2.7.2/lfs --block_size={{block_size}} -s /dev/{{DEVICE}} {{MOUNTPOINT}}
+	sudo {{HOME}}/part-ii-project/littlefs-fuse-2.7.2/lfs --block_size={{block_size}} -s /dev/{{DEVICE}} {{MOUNTPOINT}}
 	# nb: `ls /mnt` will fail if there are no files at all in the filesystem.
 
 fuse-format:
@@ -56,7 +56,7 @@ fuse-format:
 	sudo umount -q {{MOUNTPOINT}} || true
 	sudo losetup -d /dev/{{DEVICE}} || true
 	sudo losetup /dev/{{DEVICE}} {{image}}
-	sudo {{HOME}}/Project/littlefs-fuse-2.7.2/lfs --block_size={{block_size}} --format /dev/{{DEVICE}}
+	sudo {{HOME}}/part-ii-project/littlefs-fuse-2.7.2/lfs --block_size={{block_size}} --format /dev/{{DEVICE}}
 
 hexdump:
 	xxd {{image}} | less

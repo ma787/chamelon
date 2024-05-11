@@ -231,7 +231,9 @@ module Make(Sectors: Mirage_block.S) = struct
     let get_child t tree kl =
       let _, _, _, b = get_all tree in
       let cpointer = get_cpointer tree kl in
-      read_node t b cpointer
+      read_node t b cpointer >>= function
+      | Error _ as e -> Lwt.return e
+      | Ok (tr, _) -> Lwt.return @@ Ok tr
   
     let rec insert_key tree k = match tree with
     | Lf (v::next, r, b, ptr) ->

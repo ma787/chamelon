@@ -1,0 +1,6 @@
+(executable
+  (package chamelon-fuse)
+  (public_name chamelon.fuse)
+  (name fuse)
+  (libraries bos cmdliner chamelon.kv mirage-kv mirage-block-unix mirage-clock-unix ocamlfuse logs-syslog.lwt)
+)

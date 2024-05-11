@@ -1,4 +1,5 @@
 open Lwt.Infix
+open Logs_syslog_lwt
 
 (* in LittleFS, the superblock and the root of the filesystem
  * is always at a constant pair - addresses (0, 1) *)
@@ -9,6 +10,27 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
   module Block_types = Block_type.Make(Sectors)
 
   type key = Mirage_kv.Key.t
+
+  type statvfs = {
+    f_bsize : int64;
+    f_frsize : int64;
+    f_blocks : int64;
+    f_bfree : int64;
+    f_bavail : int64;
+    f_files : int64;
+    f_ffree : int64;
+    f_favail : int64;
+    f_fsid : int64;
+    f_flag : int64;
+    f_namemax : int64;
+  }
+
+  let install_logger () =
+    unix_reporter () >|= function
+      | Ok r -> Logs.set_reporter r
+      | Error e -> print_endline e
+
+  let _ = Lwt_main.run (install_logger ())
 
   let log_src = Logs.Src.create "chamelon-kv" ~doc:"chamelon KV layer"
   module Log = (val Logs.src_log log_src : Logs.LOG)
@@ -244,4 +266,91 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     Sectors.get_info block >>= fun info ->
     let block_size = info.Mirage_block.sector_size in
     Fs.format ~program_block_size ~block_size block
+
+  let exists_bool t key =
+    if Mirage_kv.Key.to_string key = "/" then Lwt.return @@ Ok true
+    else list t (Mirage_kv.Key.parent key) >>= function
+    | Error _ as e -> Lwt.return e
+    | Ok l ->
+      let lookup (name, _dict_or_val) =
+        if (String.compare name (Mirage_kv.Key.basename key)) = 0 then true
+        else false in 
+        Lwt.return @@ Ok (List.fold_left (fun found f -> found || lookup f) false l)
+
+  let mkdir t path : (unit, write_error) result Lwt.t =
+    let dir = Mirage_kv.Key.v path in
+    Fs.mkdir t root_pair (Mirage_kv.Key.segments dir) >>= function
+    | Error (`Not_found _) -> Lwt.return @@ (Error (`Not_found dir))
+    | Error `No_space as e -> Lwt.return e
+    | Ok _directory_head -> Lwt.return @@ Ok ()
+
+  let statfs t (_path : string) =
+    let open Block_types in
+    let block_count = Int64.of_int (Block_types.This_Block.block_count t.block) in
+    let block_size = Int64.of_int t.block_size in
+    let unused = Int64.of_int (List.length !(t.lookahead).blocks) in
+    let free = Int64.sub block_count unused in
+    let namemax = Int64.of_int32 t.file_size_max in
+    let stat =  {f_bsize = block_size;
+                f_frsize = block_count;
+                f_blocks = block_count;
+                f_bfree = free;
+                f_bavail = free;
+                f_files = Int64.zero;
+                f_ffree = Int64.zero;
+                f_favail = Int64.zero;
+                f_fsid = Int64.zero;
+                f_flag = Int64.zero;
+                f_namemax = namemax}
+    in Lwt.return @@ stat
+
+  let stat t path =
+    let err i = Lwt.return @@ Cstruct.create i in
+    let return cs = disconnect t.Block_types.block >>= fun _ -> Lwt.return @@ cs in
+    let key = Mirage_kv.Key.v path in
+    exists_bool t key >>= function
+    | Error _ -> Log.err (fun f -> f "error during existence check for %s" path); err 1
+    | Ok false -> Log.err (fun f -> f "error: %s does not exist in fs" path); remove t (Mirage_kv.Key.v path) >>= fun _ -> err 2
+    | Ok true ->
+      let info = Cstruct.create (1 + 8 + Int32.to_int (t.Block_types.name_length_max) + 1) in (* type : 8 bits, size : 64 bits, name : NAME_LENGTH_MAX+1 *)
+      if (path = "/") then (* special case for root *)
+        (Cstruct.set_uint8 info 0 0x002;
+        Cstruct.blit_from_string "/" 0 info 9 1;
+        return info)
+      else
+        Fs.Find.find_first_blockpair_of_directory t root_pair Mirage_kv.Key.(segments @@ parent key) >>= function
+        | `No_structs -> Log.err (fun f -> f "parent directory not found"); err 1
+        | `No_id _ -> Log.err (fun f -> f "parent directory not found"); err 1
+        | `Basename_on block_pair ->
+          Fs.Find.entries_of_name t block_pair @@ Mirage_kv.Key.basename key >>= function
+          | Error _ -> Log.err (fun f -> f "error during entries_of_name call for %s" path); err 1
+          | Ok [] -> Log.err (fun f -> f "no entries matching name found for %s" path); err 1
+          | Ok compacted ->
+            let entries = snd @@ List.(hd @@ rev compacted) in
+            let name = List.find_opt (fun (tag, _data) ->
+              Chamelon.Tag.((fst tag.type3 = LFS_TYPE_NAME))) in
+            match name entries with
+            | None -> Log.err (fun f -> f "name match failed for %s" path); err 1
+            | Some (tag, data) ->
+              let file_type = snd tag.type3 in
+              Cstruct.set_uint8 info 0 file_type;
+              Cstruct.blit data 0 info 9 (Cstruct.length data);
+              if Int.equal file_type 0x002 then return info
+              else
+                (let inline_files = List.find_opt (fun (tag, _data) ->
+                  Chamelon.Tag.((fst tag.type3) = LFS_TYPE_STRUCT) &&
+                  Chamelon.Tag.((snd tag.type3) = 0x01)) in
+                let ctz_files = List.find_opt (fun (tag, _block) ->
+                    Chamelon.Tag.((fst tag.type3 = LFS_TYPE_STRUCT) &&
+                                  Chamelon.Tag.((snd tag.type3 = 0x02)
+                                              ))) in
+                match inline_files entries, ctz_files entries with
+                | None, None -> Log.err (fun f -> f "both inline and ctz matches failed for %s" path); err 1
+                | Some (tag, _data), None -> Cstruct.LE.set_uint64 info 1 (Int64.of_int tag.Chamelon.Tag.length); return info
+                | _, Some (_tag, data) ->
+                  match Chamelon.File.ctz_of_cstruct data with
+                  | Some (_pointer, length) -> Cstruct.LE.set_uint64 info 1 length; return info
+                  | None -> Log.err (fun f -> f "ctz_of_cstruct failed for %s" path); err 1)
+
+  let mknod t path = set t (Mirage_kv.Key.v path) "" >>= fun _ -> Lwt.return_unit
 end

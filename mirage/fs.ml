@@ -71,7 +71,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
     let build_btree t b =
       Fs_Btree.Serial.read_node t b btree_root >>= function
       | Error _ as e -> Lwt.return e
-      | Ok tree, valid -> 
+      | Ok (tree, valid) -> 
         if valid then Lwt.return @@ Ok tree
         else Fs_Btree.Serial.write_empty_root t tree >>= function
         | Error _ as e -> Lwt.return e
