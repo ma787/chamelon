@@ -146,16 +146,18 @@ module Make(Sectors: Mirage_block.S) = struct
       | Ok hblock ->
         let r = (Int64.equal pointer root_pointer) in
         let valid = Cstruct.LE.get_uint64 hblock 0 in
-        if r && not Int64.(equal valid one) then Lwt.return @@ Ok (Lf ([], true, b, pointer)) 
+        if not Int64.(equal valid one) then 
+          if r then Lwt.return @@ Ok (Lf ([], true, b, pointer), false)
+          else Lwt.return @@ Error `Read_error
         else let cblockpointer = Cstruct.LE.get_uint64 hblock sizeof_pointer in
         let nk, ks = parse_keys hblock in
         if Int64.equal cblockpointer null_pointer then 
-          Lwt.return @@ Ok (Lf (ks, r, b, pointer))
+          Lwt.return @@ Ok (Lf (ks, r, b, pointer), true)
         else read_block t cblockpointer >>= function
         | Error _ as e -> Lwt.return e
         | Ok cblock ->
           let cpointers = parse_cpointer_block cblock nk in
-          Lwt.return @@ Ok (Il (ks, cpointers, r, b, (pointer, cblockpointer)))
+          Lwt.return @@ Ok (Il (ks, cpointers, r, b, (pointer, cblockpointer)), true)
 
     let rec used_blocks t pointer =
       read_block t pointer >>= function
