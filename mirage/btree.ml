@@ -159,37 +159,26 @@ module Make(Sectors: Mirage_block.S) = struct
           let cpointers = parse_cpointer_block cblock nk in
           Lwt.return @@ Ok (Il (ks, cpointers, r, b, (pointer, cblockpointer)), true)
 
-    let rec used_blocks t pointer =
+    let rec used_blocks t arr pointer =
       read_block t pointer >>= function
       | Error _ as e -> Lwt.return e
       | Ok hblock ->
         let nk = Int64.to_int (Cstruct.LE.get_uint64 hblock (2*sizeof_pointer)) in
         let cblockpointer = Cstruct.LE.get_uint64 hblock sizeof_pointer in
-        if Int64.(equal cblockpointer max_int) then Lwt.return @@ Ok []
+        if Int64.(equal cblockpointer max_int) then Lwt.return @@ Ok arr
         else read_block t cblockpointer >>= function
         | Error _ as e -> Lwt.return e
         | Ok cblock ->
           let cpointers = parse_cpointer_block cblock nk in
-          Lwt_list.fold_left_s (fun l p -> match l with
+          Lookahead.update_lookahead arr cblock;
+          Lwt_list.fold_left_s (fun a_res p -> match a_res with
           | Error _ as e -> Lwt.return e
-          | Ok blocks -> used_blocks t p >>= function
+          | Ok current -> used_blocks t current p >>= function
             | Error _ as e -> Lwt.return e
-            | Ok new_blocks -> Lwt.return @@ Ok (new_blocks @ blocks)) (Ok cpointers) cpointers >>= function
-          | Error _ as e -> Lwt.return e
-          | Ok blocks -> Lwt.return @@ Ok blocks
-
-
-    let get_block_pointers t n = 
-      let get_block t = match !(t.lookahead).blocks with
-      | p::ptrs -> 
-        t.lookahead := {!(t.lookahead) with blocks = ptrs}; Lwt.return @@ Ok p
-      | [] -> Lwt.return @@ Error `No_space in
-      let rec aux t acc n =
-        if n=0 then Lwt.return @@ Ok acc
-        else get_block t >>= function
-        | Error _ as e -> Lwt.return e
-        | Ok p -> aux t (p::acc) (n-1) in
-      aux t [] n
+            | Ok new_arr -> Lwt.return @@ Ok new_arr
+            ) (Ok arr) cpointers >>= function
+              | Error _ as e -> Lwt.return e
+              | Ok new_arr -> Lwt.return @@ Ok new_arr
     end
   
   open Serial
@@ -356,15 +345,19 @@ module Make(Sectors: Mirage_block.S) = struct
         else if cleaf then 1 else 2 in
       if ignore then
         Lwt.return @@ Ok (update_node parent mk rptr) else
-        Serial.get_block_pointers t n_pointers >>= function
-        | Error _ as e -> Lwt.return e
-        | Ok pointers -> let hl, cl, hr, cr, crt = match pointers with
-          | hl::hr::crt::[] when root_split && pleaf -> hl, null_pointer, hr, null_pointer, crt
-          | hl::cl::hr::cr::[] when root_split && not pleaf -> hl, cl, hr, cr, null_pointer
-          | hr::more when not root_split ->
-            let hl, cl = get_pointers tree in 
-            hl, cl, hr, (if cleaf then null_pointer else List.hd more), null_pointer
-          | _ -> null_pointer, null_pointer, null_pointer, null_pointer, null_pointer in
+        Allocate.get_blocks t n_pointers >>= function
+        | Error _ -> Lwt.return @@ Error `No_space
+        | Ok blocks ->
+          let hl, cl, hr, cr, crt =
+            if root_split then
+              if pleaf then 
+                Cstruct.LE.(get_uint64 blocks 0, null_pointer, get_uint64 blocks 1,
+            null_pointer, get_uint64 blocks 2)
+              else Cstruct.LE.(get_uint64 blocks 0, get_uint64 blocks 1, get_uint64 blocks 2,
+              get_uint64 blocks 3, null_pointer)
+            else let hl, cl = get_pointers tree in
+            Cstruct.LE.(hl, cl, get_uint64 blocks 0, 
+            (if cleaf then null_pointer else get_uint64 blocks 1), null_pointer) in
           let hp, cbp = get_pointers parent in
           let t_left, t_right = 
             if cleaf then Lf (lks, false, b, hl), Lf (rks, false, b, hr)

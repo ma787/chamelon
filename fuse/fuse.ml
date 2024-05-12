@@ -31,18 +31,18 @@ let chamelon_statfs bs img path =
   Lwt_main.run @@ (
       Log.app (fun f -> f "statfs call, path = %s" path);
       mount bs img >>= fun t ->
-      Littlefs.statfs t path >>= fun stat ->
-      let fs_stat = {f_bsize = stat.f_bsize;
-      f_frsize = stat.f_frsize;
-      f_blocks = stat.f_blocks;
-      f_bfree = stat.f_bfree;
-      f_bavail = stat.f_bavail;
+      Littlefs.statfs t path >>= fun (b_count, free, name_max) ->
+      let fs_stat = {f_bsize = Int64.of_int bs;
+      f_frsize = b_count;
+      f_blocks = b_count;
+      f_bfree = free;
+      f_bavail = free;
       f_files = u_statfs.f_files;
       f_ffree = u_statfs.f_ffree;
       f_favail = u_statfs.f_favail;
       f_fsid = u_statfs.f_fsid;
       f_flag = u_statfs.f_flag;
-      f_namemax = stat.f_namemax}
+      f_namemax = name_max}
       in Lwt.return @@ fs_stat)
 
 let chamelon_stat bs img path =
@@ -51,21 +51,23 @@ let chamelon_stat bs img path =
     Log.app (fun f -> f "stat call, path = %s" path);
     mount bs img >>= fun t ->
     Littlefs.stat t path >>= fun info ->
-      try
-        let file_type = Cstruct.get_uint8 info 0 in
-        Lwt.return @@ {st_dev = 0;
-        st_ino = u_stat.st_ino;
-        st_kind = (if Int.equal file_type 0x002 then S_DIR else S_REG);
-        st_perm = if Int.equal file_type 0x001 then 0o444 else u_stat.st_perm;
-        st_nlink = 1;
-        st_uid = u_stat.st_uid;
-        st_gid = u_stat.st_gid;
-        st_rdev = u_stat.st_rdev;
-        st_size = (if Int.equal file_type 0x001 then Int64.of_int32 (Cstruct.LE.get_uint32 info 1) else u_stat.st_size);
-        st_atime = u_stat.st_atime;
-        st_mtime = u_stat.st_mtime;
-        st_ctime = u_stat.st_ctime}
-      with Invalid_argument _ -> raise (Unix_error (ENOENT, "stat", path))
+      let file_type = Cstruct.get_uint8 info 0 in
+      if file_type=255 then raise (Unix_error (ENOENT, "stat", path))
+      else let size, kind = 
+        if file_type=1 then Cstruct.LE.get_uint64 info 1 , S_REG
+        else u_stat.st_size, S_DIR in
+      Lwt.return {st_dev = 0;
+      st_ino = u_stat.st_ino;
+      st_kind = kind;
+      st_perm = u_stat.st_perm;
+      st_nlink = 1;
+      st_uid = u_stat.st_uid;
+      st_gid = u_stat.st_gid;
+      st_rdev = u_stat.st_rdev;
+      st_size = size;
+      st_atime = u_stat.st_atime;
+      st_mtime = u_stat.st_mtime;
+      st_ctime = u_stat.st_ctime}
   )
 
 let chamelon_readdir bs img path (_fd : int) =
