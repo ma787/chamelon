@@ -87,7 +87,7 @@ module Block = struct
   let example_block =
     let entries = [
       Chamelon.File.name "one" 1;
-      Chamelon.File.create_ctz 1 ~pointer:2L ~file_size:1024L;
+      Chamelon.File.create_btree 1 ~pointer:2L ~file_size:1024L;
       Chamelon.File.name "two" 2;
       Chamelon.File.create_inline 2 (Cstruct.create 8), Cstruct.create 8;
       Chamelon.File.name "three" 3;
@@ -246,11 +246,11 @@ module File = struct
     | `Skip -> Alcotest.fail "inappropriately skipped a directory"
     | `Dir p ->
       Alcotest.(check @@ pair int64 int64) "dirpair to recurse into for size" (2L, 3L) p;
-      let ctz = Chamelon.File.create_ctz 2 ~pointer:4L ~file_size:10L in
-      match Chamelon.Content.size ctz with
-      | `Dir _ | `Skip -> Alcotest.fail "didn't get file size for a ctz"
+      let btr = Chamelon.File.create_btree_file 2 ~pointer:4L ~file_size:10L in
+      match Chamelon.Content.size btr with
+      | `Dir _ | `Skip -> Alcotest.fail "didn't get file size for a b-tree"
       | `File n ->
-        Alcotest.(check int) "file size for a ctz" 10 n;
+        Alcotest.(check int) "file size for a b-tree" 10 n;
         let v = Cstruct.of_string "pies" in
         let inline = Chamelon.File.create_inline 3 v in
         match Chamelon.Content.size (inline, v) with

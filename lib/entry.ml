@@ -45,7 +45,7 @@ let links (tag, data) =
       | Some s -> Some (Metadata s)
     end
     | 0x02 -> begin
-        match File.ctz_of_cstruct data with
+        match File.btree_of_cstruct data with
         | None -> None
         | Some s -> Some (Data s)
       end

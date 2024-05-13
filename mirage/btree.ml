@@ -1,14 +1,15 @@
-type keys = int64 list
+type keys = int32 list
+type pls = int64 list
 type node = 
-| Lf of keys * bool * int * int64
-| Il of keys * int64 list * bool * int * (int64 * int64)
+| Lf of keys * pls * bool * int * int64
+| Il of keys * pls * int64 list * bool * int * (int64 * int64)
 
 exception MalformedTree of string
 exception NotFound of string
 exception InvalidOperation of string
 
 let null_pointer = Int64.max_int
-let null_tree = Lf ([], false, 0, null_pointer)
+let null_tree = Lf ([], [], false, 0, null_pointer)
 let root_pointer = 2L
 
 open Lwt.Infix
@@ -18,6 +19,7 @@ module Make(Sectors: Mirage_block.S) = struct
 
   open Block_types
   let sizeof_pointer = 8
+  let sizeof_key = 4
 
   type error = [
     | `Read_error
@@ -29,24 +31,24 @@ module Make(Sectors: Mirage_block.S) = struct
 
   module Attrs = struct
     let n_keys tree = match tree with
-    | Il (ks, _, _, _, _) -> List.length ks
-    | Lf (ks, _, _, _) -> List.length ks
+    | Il (ks, _, _, _, _, _) -> List.length ks
+    | Lf (ks, _, _, _, _) -> List.length ks
   
     let get_hd tree = match tree with
-    | Il (ks, _, _, _, _) -> List.hd ks
-    | Lf (ks, _, _, _) -> List.hd ks
+    | Il (ks, _, _, _, _, _) -> List.hd ks
+    | Lf (ks, _, _, _, _) -> List.hd ks
   
     let is_leaf tree = match tree with
     | Il _ -> false
     | Lf _ -> true
   
     let get_all tree = match tree with
-    | Il (ks, cn, r, b, _) -> ks, cn, r, b
-    | Lf (ks, r, b, _) -> ks, [], r, b
+    | Il (ks, pls, cn, r, b, _) -> ks, pls, cn, r, b
+    | Lf (ks, pls, r, b, _) -> ks, pls, [], r, b
 
     let get_pointers tree = match tree with
-    | Il (_, _, _, _, (hptr, cbptr)) -> hptr, cbptr
-    | Lf (_, _, _, ptr) -> ptr, null_pointer
+    | Il (_, _, _, _, _, (hptr, cbptr)) -> hptr, cbptr
+    | Lf (_, _, _, _, ptr) -> ptr, null_pointer
   
     let split_ks n ks = 
       let rec splitv ks newks i = match ks with
@@ -66,11 +68,15 @@ module Make(Sectors: Mirage_block.S) = struct
     | c::cs -> if c=v then i else get_index cs v (i+1)
   
     let to_string tree = 
-      let ks, cn, r, b = get_all tree in
+      let ks, pls, cn, r, b = get_all tree in
+      let string_of_int32_list l = 
+        "{" ^ (List.fold_left (fun acc x -> 
+          acc ^ Int32.to_string x ^ ",") "" l) ^ "}" in
       let string_of_int64_list l = 
         "{" ^ (List.fold_left (fun acc x -> 
           acc ^ Int64.to_string x ^ ",") "" l) ^ "}" in
-      "(" ^ (string_of_int64_list ks) ^ ", " ^ (string_of_int64_list cn) ^ 
+      "(" ^ (string_of_int32_list ks) ^ ", " ^ (string_of_int64_list pls) ^ 
+      ", " ^ (string_of_int64_list cn) ^ 
       (string_of_bool r) ^ ", " ^ (string_of_int b) ^ ")"
     end
 
@@ -114,16 +120,19 @@ module Make(Sectors: Mirage_block.S) = struct
       let nk = Attrs.n_keys tree in
       let hpointer, cblockpointer = get_pointers tree in
       let cs = Cstruct.create t.block_size in
-      let ks, _, _, _ = Attrs.get_all tree in
+      let ks, pls, _, _, _ = Attrs.get_all tree in
       (* value identifying the root node *)
-      let v = Int64.(if equal hpointer root_pointer then one else zero) in
-      Cstruct.LE.set_uint64 cs 0 v; 
+      let v = if Int64.equal hpointer root_pointer then Int32.one else Int32.zero in
+      Cstruct.LE.set_uint32 cs 0 v; 
       (* pointer to block containing child node pointers *)
-      Cstruct.LE.set_uint64 cs sizeof_pointer cblockpointer;
+      Cstruct.LE.set_uint64 cs sizeof_key cblockpointer;
       (* number of keys in this node *)
-      Cstruct.LE.set_uint64 cs (2*sizeof_pointer) (Int64.of_int nk);
+      Cstruct.LE.set_uint32 cs (sizeof_key+sizeof_pointer) (Int32.of_int nk);
       for n=0 to nk-1 do
-        Cstruct.LE.set_uint64 cs ((n+3)*sizeof_pointer) (List.nth ks n);
+        Cstruct.LE.set_uint32 cs (2*sizeof_pointer+(n*sizeof_key)) (List.nth ks n);
+      done;
+      for n=nk to (2*nk-1) do
+        Cstruct.LE.set_uint64 cs ((2+n)*sizeof_pointer+(nk*sizeof_key)) (List.nth pls n);
       done;
       write_block t hpointer cs
 

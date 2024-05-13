@@ -14,6 +14,7 @@ module Make(Sectors: Mirage_block.S)(Clock : Mirage_clock.PCLOCK) : sig
    * [get_partial t k ~offset ~length], if successful, gives a result of (Ok v) where String.length v <= [length]. If [offset + length] is greater than the file length, (Ok v) is returned where [v]'s first byte is [offset] and its last byte is the last byte in the file. *)
   val get_partial : t -> key -> offset:int -> length:int -> (string, error) result Lwt.t
   
+  val write : offset:int -> length:int -> t -> key -> string -> (unit, write_error) result Lwt.t
   val mkdir : t -> string -> (unit, write_error) result Lwt.t
   val statfs : t -> string -> (int64 * int64 * int64) Lwt.t
   val stat : t -> string -> Cstruct.t Lwt.t

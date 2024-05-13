@@ -4,7 +4,7 @@
 [%%cenum
 type abstract_type =
   | LFS_TYPE_NAME [@id 0x0] (* associates IDs with file names and file types OR initializes them as files, directories, or superblocks *)
-  | LFS_TYPE_STRUCT [@id 0x2] (* gives an id a structure (inline or CTZ) *)
+  | LFS_TYPE_STRUCT [@id 0x2] (* gives an id a structure (inline or b-tree) *)
   | LFS_TYPE_USERATTR [@id 0x3] (* 'user-defined', gross. "currently no standard user attributes" so we can just ignore them *)
   | LFS_TYPE_SPLICE [@id 0x4] (* create or delete file with a given ID depending on chunk info *)
   | LFS_TYPE_CRC [@id 0x5] (* CRC-32 for commits to the metadata block; polynomial of 0x04c11db7 initialized with 0xffffffff *)
@@ -16,7 +16,7 @@ type abstract_type =
 module Magic = struct
   let struct_dir = 0x00
   let struct_inline = 0x01
-  let struct_ctz = 0x02
+  let struct_btree = 0x02
 
   let tail_soft = 0x00
   let tail_hard = 0x01
@@ -56,7 +56,7 @@ let xor ~into arg =
 let is_file_struct tag =
   (fst tag.type3) = LFS_TYPE_STRUCT &&
   ((snd tag.type3) = Magic.struct_dir
-   || snd tag.type3 = Magic.struct_ctz)
+   || snd tag.type3 = Magic.struct_btree)
 
 let is_hardtail {type3; _} =
   (fst type3) = LFS_TYPE_TAIL && (snd type3) = Magic.tail_hard

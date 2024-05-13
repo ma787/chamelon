@@ -50,11 +50,11 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
 
   let get_partial = Fs.File_read.get_partial
 
-  (* [set] does a little work on top of the filesystem's set functions, because
+  (* [write] does a little work on top of the filesystem's set functions, because
    * we need to make directories if the key has >1 segment in it. *)
   (* Once we've either found or created the parent directory, we can ask the FS layer
    * to set the data appropriately there. *)
-  let set t key data : (unit, write_error) result Lwt.t =
+  let set_partial ~offset ~length t key data : (unit, write_error) result Lwt.t =
     let name_length = String.length @@ Mirage_kv.Key.basename key in
     if name_length > (Int32.to_int t.Block_types.name_length_max) then begin
       Log.err (fun f -> f "key length %d exceeds max length %ld - refusing to write" name_length t.Block_types.name_length_max);
@@ -68,7 +68,7 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                       Mirage_kv.Key.pp key
                       (fst block_pair) (snd block_pair));
         (* the directory already exists, so just write the file *)
-        Fs.File_write.set_in_directory block_pair t (Mirage_kv.Key.basename key) data
+        Fs.File_write.set_in_directory block_pair t (Mirage_kv.Key.basename key) ~offset ~length data
       | `No_id path -> begin
           Log.debug (fun m -> m "path component %s had no id; making it and its children" path);
           (* something along the path is missing, so make it. *)
@@ -82,7 +82,7 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
             Log.debug (fun m -> m "made filesystem structure for %a, writing to blockpair %Ld, %Ld"
                           Mirage_kv.Key.pp dir (fst block_pair) (snd block_pair)
                       );
-            Fs.File_write.set_in_directory block_pair t (Mirage_kv.Key.basename key) data
+            Fs.File_write.set_in_directory block_pair t (Mirage_kv.Key.basename key) ~offset ~length data
         end
       (* No_structs represents an inconsistent on-disk structure.
        * We can't do the right thing, so we return an error. *)
@@ -90,6 +90,9 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
         Log.err (fun m -> m "id was present but no matching directory structure");
         Lwt.return @@ Error (`Not_found key)
     end
+
+  let set t key data : (unit, write_error) result Lwt.t = 
+    set_partial ~offset:0 ~length:(String.length data) t key data
 
   (** [list t key], where [key] is a reachable directory,
    * gives the files and directories (values and dictionaries) in [key].
@@ -313,17 +316,17 @@ module Make(Sectors : Mirage_block.S)(Clock : Mirage_clock.PCLOCK) = struct
                 (let inline_files = List.find_opt (fun (tag, _data) ->
                   Chamelon.Tag.((fst tag.type3) = LFS_TYPE_STRUCT) &&
                   Chamelon.Tag.((snd tag.type3) = 0x01)) in
-                let ctz_files = List.find_opt (fun (tag, _block) ->
+                let btree_files = List.find_opt (fun (tag, _block) ->
                     Chamelon.Tag.((fst tag.type3 = LFS_TYPE_STRUCT) &&
                                   Chamelon.Tag.((snd tag.type3 = 0x02)
                                               ))) in
-                match inline_files entries, ctz_files entries with
+                match inline_files entries, btree_files entries with
                 | None, None -> 
                   Log.err (fun f -> f "entry exists for %s but not a file or dir" path); err 1
                 | Some (tag, _data), None -> 
                   Cstruct.LE.set_uint64 info 1 (Int64.of_int tag.Chamelon.Tag.length); Lwt.return info
                 | _, Some (_tag, data) ->
-                  match Chamelon.File.ctz_of_cstruct data with
+                  match Chamelon.File.btree_of_cstruct data with
                   | Some (_pointer, length) -> Cstruct.LE.set_uint64 info 1 length; Lwt.return info
                   | None -> Log.err (fun f -> f "couldn't parse file entry for %s" path); err 1)
 

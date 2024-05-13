@@ -5,8 +5,8 @@ let size (tag, data) =
     match tag.Tag.type3 with
     | Tag.LFS_TYPE_STRUCT, c when c = Tag.Magic.struct_inline ->
       `File tag.Tag.length
-    | Tag.LFS_TYPE_STRUCT, c when c = Tag.Magic.struct_ctz -> begin
-      match File.ctz_of_cstruct data with
+    | Tag.LFS_TYPE_STRUCT, c when c = Tag.Magic.struct_btree -> begin
+      match File.btree_of_cstruct data with
       | None -> `Skip
       | Some (_, file_size) -> `File (Int64.to_int file_size)
     end
