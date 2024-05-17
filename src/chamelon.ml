@@ -32,6 +32,17 @@ let read common_options path =
     | Error _ -> Format.eprintf "filesystem was opened, but read failed\n%!"; exit 2
   )
 
+let read_partial common_options path offset length =
+  let open Lwt.Infix in
+  Lwt_main.run @@ (
+    mount common_options >>= fun t ->
+    Littlefs.get_partial t (Mirage_kv.Key.v path) ~offset ~length >>= function
+    | Ok v -> Format.printf "%s%!" v; Lwt.return_unit
+    | Error (`Not_found _key) -> Format.eprintf "key %s not found\n%!" path; exit 1
+    | Error (`Value_expected _key) -> Format.eprintf "%s isn't bound to a key\n%!" path; exit 1
+    | Error _ -> Format.eprintf "filesystem was opened, but read failed\n%!"; exit 2
+  )
+
 let remove common_options path =
   let open Lwt.Infix in
   Lwt_main.run @@ (
@@ -78,6 +89,24 @@ let write common_options path data =
       exit 1
   )
 
+  let write_partial common_options path data offset length =
+    let open Lwt.Infix in
+    Lwt_main.run @@ (
+      mount common_options >>= fun t ->
+      let data =
+        if String.equal data "-" then begin
+          match Bos.OS.File.(read dash) with
+          | Error _ -> Logs.err (fun m -> m "couldn't understand what I should write\n%!"); exit 1
+          | Ok data -> data
+        end else data
+      in
+      Littlefs.set_partial ~offset ~length t (Mirage_kv.Key.v path) data >>= function
+      | Ok () -> Logs.debug (fun m -> m "successfully wrote to %s" path);
+        Lwt.return_unit
+      | Error e -> Logs.err (fun m -> m "%a" Littlefs.pp_write_error e);
+        exit 1
+    )
+
 let common_options_t =
   let block_size =
     let doc = "block size of the filesystem in bytes" in
@@ -120,6 +149,19 @@ let read_command =
   let info = Cmdliner.Cmd.info "read" ~doc in
   Cmdliner.Cmd.v info Cmdliner.Term.(const read $ common_options_t $ path)
 
+let read_partial_command =
+  let offset =
+    let doc = "offset to read from in the file" in
+    Cmdliner.Arg.(value & pos 3 int 0 & info ~doc ~docv:"OFFSET" [])
+  in
+  let length =
+    let doc = "number of bytes to read from the file" in
+    Cmdliner.Arg.(value & pos 4 int 0 & info ~doc ~docv:"LENGTH" [])
+  in
+  let doc = "put selected region of file contents on stdout" in
+  let info = Cmdliner.Cmd.info "read_partial" ~doc in
+  Cmdliner.Cmd.v info Cmdliner.Term.(const read_partial $ common_options_t $ path $ offset $ length)
+
 let remove_command =
   let doc = "recursively remove a path and all items within it" in
   let info = Cmdliner.Cmd.info "rm" ~doc in
@@ -134,6 +176,23 @@ let write_command =
   let info = Cmdliner.Cmd.info "write" ~doc in
   Cmdliner.Cmd.v info Cmdliner.Term.(const write $ common_options_t $ path $ data)
 
+let write_partial_command =
+  let data =
+    let doc = "data to write to the file. Provide - for stdin." in
+    Cmdliner.Arg.(value & pos 3 string "-" & info ~doc ~docv:"DATA" [])
+  in
+  let offset =
+    let doc = "offset to write to in the file." in
+    Cmdliner.Arg.(value & pos 4 int 0 & info ~doc ~docv:"OFFSET" [])
+  in
+  let length =
+    let doc = "number of bytes to write in the file." in
+    Cmdliner.Arg.(value & pos 5 int 0 & info ~doc ~docv:"LENGTH" [])
+  in
+  let doc = "write or append to a file" in
+  let info = Cmdliner.Cmd.info "write_partial" ~doc in
+  Cmdliner.Cmd.v info Cmdliner.Term.(const write_partial $ common_options_t $ path $ data $ offset $ length)
+
 let main_cmd =
   let doc = "filesystem operations on chamelon images" in
   let info = Cmdliner.Cmd.info "chamelon" ~doc in
@@ -142,7 +201,9 @@ let main_cmd =
   Cmdliner.Cmd.group info ~default [format_command;
                                     list_command;
                                     read_command;
+                                    read_partial_command;
                                     write_command;
+                                    write_partial_command;
                                     remove_command;]
 
 let () = exit (Cmdliner.Cmd.eval main_cmd)

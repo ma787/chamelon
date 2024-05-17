@@ -96,7 +96,7 @@ let chamelon_read bs img path buf offset (_fd : int) =
       Log.app (fun f -> f "data read (first 10 bytes): %s" (String.sub v 0 (min 10 (String.length v))));
       Lwt.return @@ len)
 
-let chamelon_write bs img path buf offset (_fd : int) =
+let chamelon_write bs img path buf off (_fd : int) =
   Lwt_main.run @@ (
     mount bs img >>= fun t ->
     let buf_cs = Cstruct.of_bigarray buf ~off:0 in
@@ -109,9 +109,10 @@ let chamelon_write bs img path buf offset (_fd : int) =
       end else data, 0 in
     if Int.equal err (-1) then (Log.app (fun m -> m "couldn't understand what I should write\n%!"); Lwt.return @@ -1)
     else 
-      (Littlefs.set t (Mirage_kv.Key.v path) to_write >>= (function
+      (let offset, length = Int64.to_int off, String.length to_write in
+      Littlefs.set_partial ~offset ~length t (Mirage_kv.Key.v path) to_write >>= (function
       | Ok () -> 
-        Log.app (fun f -> f "successfully wrote %d bytes from file offset %Ld to buffer of size %d" (String.length to_write) offset (Cstruct.length buf_cs)); 
+        Log.app (fun f -> f "successfully wrote %d bytes from file offset %Ld to buffer of size %d" (String.length to_write) off (Cstruct.length buf_cs)); 
         Log.app (fun f -> f "data written (first 10 bytes): %s" (String.sub to_write 0 (min 10 (String.length to_write))));
         Lwt.return @@ (String.length to_write)
       | Error _ -> Log.app (fun f -> f "error when writing to %s" path); Lwt.return @@ -1))
